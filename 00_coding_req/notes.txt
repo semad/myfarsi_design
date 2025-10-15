@@ -1,0 +1,3 @@
+1- Order of languages infrastructure: make, terraform, bash 
+
+2- Order of languages for development: make, bash, go, python, javascript
