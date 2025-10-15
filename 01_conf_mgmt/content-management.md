@@ -1,97 +1,58 @@
-# Content Management Platform
+# Configuration Content Lifecycle
 
-## Mission
-Deliver a headless CMS tailored to MyFarsi’s knowledge-base needs—workflow-heavy, localized content served through authenticated APIs behind Consul API Gateway. This platform must integrate seamlessly with Authentik SSO, publish on schedules, and expose structured APIs for consumers.
+## Purpose
+Define how configuration artifacts (KV exports, policies, templates) are created, reviewed, promoted, and audited inside the `platform-config` namespace. This complements `01_conf_mgmt/config-management.md` by focusing on the human workflows and content structure that keep configuration consistent across environments.
 
-## Core Requirements
-- Authoring with hierarchical taxonomy, tags, rich text, attachments, and related links.
-- Editorial workflow (Draft → Review → Approved → Published → Archived) with notifications and SLA tracking.
-- Localization per locale with configurable fallback order.
-- Scheduled publish/unpublish windows (time-zone aware).
-- Version history/diffs for compliance.
-- Role-based access groups (author, editor, approver, publisher, viewer).
-- Searchable delivery APIs (REST + future GraphQL) supporting metadata filters.
-- Non-functional: Go 1.25 codebase, PostgreSQL primary store, Redis for jobs/cache, integrate with Observability stack, Kubernetes deployment in `content` namespace.
+## Content Types
+| Artifact | Location | Notes |
+| --- | --- | --- |
+| Consul KV exports | `configs/<service>/<env>/service.vN.yaml` | Versioned YAML produced by `config-cli consul export`. |
+| Consul config entries | `configs/consul/config_entries/<type>/<name>.yaml` | Service defaults, intentions, routers, and splitters. |
+| Vault policies and roles | `configs/vault/<env>/policy/<name>.hcl` | Managed via Terraform or direct API; stored for review. |
+| Bootstrap scripts | `configs/bootstrap/<env>/*.sh` | One-off commands (e.g., ACL bootstrap); kept for reproducibility. |
+| Documentation | `docs/platform-config/*.md` | How-to guides, runbooks, and policy rationale. |
 
-## Architecture
-```
-Editors ─► Consul API Gateway ─► Forward-Auth ─► CMS Admin API/UI ─► PostgreSQL
-                                                 │                        │
-                                                 │                        └► Redis (jobs/cache)
-Consumers ─► Consul API Gateway ─► Forward-Auth ─► CMS Content API ─► CDN/cache (optional)
+Every artifact must be traceable to a change request (ticket, ADR, or incident) and carry environment ownership metadata in commit messages or file headers.
 
-Supporting services: Authentik (SSO), MinIO/S3 for media, PostgreSQL full-text or Elasticsearch for search, Observability stack.
-```
-- Single Go service exposes admin and delivery APIs; SPA admin UI served from same binary.
-- Background workers (Redis-backed queue) handle scheduling, search indexing, notifications.
-- Publish/unpublish events raise Kafka messages for downstream consumers (search, personalization).
+## Authoring Workflow
+1. **Draft**: Engineers modify artifacts locally using `config-cli render` and `make config-validate`.
+2. **Review**: Pull request reviewers validate structure, check impact using dry-run exports, and confirm references to relevant tickets or ADRs.
+3. **Approval**: At least one domain owner approves. Sensitive changes (Vault policies, gateway intentions) require security sign-off.
+4. **Promotion**: After merge, Argo CD syncs staging first. Production promotion uses either automatic sync with manual gate or timed release per change severity.
+5. **Audit Trail**: `config-cli consul export --diff` runs nightly to generate drift reports stored under `reports/<date>/`. Any divergence opens an issue.
 
-## Domain Model Highlights
-| Entity | Description |
-| --- | --- |
-| `Space` | Logical tenant (e.g., `knowledge-base`), holds default locale and taxonomy rules. |
-| `Article` | Canonical record with slug, status, scheduling window, ownership metadata. |
-| `ArticleVersion` | Immutable snapshot per locale; stores title, body, attachments, SEO metadata. |
-| `WorkflowState` | Tracks review state, assignee, due date, comments. |
-| `Category` / `Tag` | Hierarchical taxonomy + many-to-many tagging for discovery. |
-| `AuditLog` | Records state transitions, scheduling changes, permission updates. |
+## Naming and Versioning
+- Files use semantic versions (v1, v2...) appended to the service name. Deprecated versions remain for traceability until the next release train.
+- KV keys follow `<env>/<service>/<component>/<key>` to avoid collisions. Avoid camelCase; prefer snake_case.
+- Policies include a `metadata` block documenting owner, created date, and contact channel.
+- Use `README.md` in each service directory to describe parameters, default values, and rollout notes.
 
-Localization fallback: e.g., `fa-IR` → `fa` → `en`. Delivery API accepts `Accept-Language` or explicit `locale`.
+## Validation
+- `make config-validate`: runs schema validation, `config-cli consul export --validate`, and YAML linters.
+- `make config-test`: spins up local Consul/Vault (dev mode) and executes smoke tests to ensure templates render and required keys exist.
+- CI enforces both targets on every PR; failures block merge.
+- For sensitive KV updates (feature flags, rate limits), include automated tests in service repos to assert behavior under new values.
 
-## Workflow & Scheduling
-1. Draft created (auto-save, versioned).
-2. Submit for review: assigns editor, sends notifications (email/Slack).
-3. Approved: publisher schedules go-live/unpublish; validation ensures mandatory locales ready or flagged for fallback.
-4. Scheduler job promotes content to `Published` at start, `Archived` or `Expired` at end.
-5. Publishing triggers search indexing and cache invalidation events.
+## Promotion Strategy
+- **Staging First**: All changes apply to staging and remain for at least one business day. Monitor telemetry dashboards (`03_telemetry/observability-platform.md`) for anomalies.
+- **Emergency Fixes**: Use tagged `hotfix/` branches; document root cause and follow-up ADR if policy shifts.
+- **Rollback**: Reapply previous version file and rerun `config-cli consul export --scope <env> --version <prev>`. Post-incident review required.
+- **Multi-environment Changes**: Introduce toggles or conditional keys so staging and production can diverge temporarily without drift.
 
-## API Strategy
-- **Admin API**: Authentik-protected endpoints for CRUD, workflow transitions, localization tasks. GraphQL introspection disabled by default; rely on REST/JSON.
-- **Content API**: Read-only, versioned endpoints (e.g., `/v1/articles/{slug}`) returning localized body plus metadata. Optional GraphQL view once schema stabilized.
-- **Caching**: HTTP caching via gateway/CDN keyed by locale/version. Provide `ETag`/`Last-Modified`.
-- **Search**: Start with PostgreSQL `tsvector`; shift to Elasticsearch/OpenSearch when traffic demands synonyms/highlighting.
+## Compliance and Retention
+- Retain configuration history indefinitely in Git (point-in-time restore is trivial).
+- Nightly snapshots of Consul and Vault ensure config remains recoverable even if Git history is inaccessible.
+- Access reviews happen quarterly; reference `SystemReqs.md` for non-functional requirements.
+- Align with data residency decisions from `22_db_back/adr/0001-data-retention.md`; exports stored in MinIO must remain in EU regions.
 
-## Storage & Infrastructure
-- PostgreSQL with managed service in staging/prod; migrations via Atlas.
-- Redis for job queue + caching (TTL-limited). Consider separate instances for background work vs. API caching.
-- Media stored in MinIO/S3 with signed URL access; metadata stored in PostgreSQL.
-- Helm chart under `charts/cms`; Argo CD deploys per environment. ExternalSecrets supply DB credentials, Redis URL, OAuth secrets.
-
-## Security & Compliance
-- Authentik forward-auth enforces login; trust headers `x-user`, `x-groups`.
-- RBAC enforced at service level; group mapping maintained in configuration (`cms-authors`, `cms-editors`, etc.).
-- CSRF protection for admin UI; SameSite cookies and anti-CSRF tokens.
-- Audit trail retained 2 years; exportable for compliance.
-- Rate limits and WAF policies configured at Consul API Gateway.
-- Secrets stored in ExternalSecrets, rotated quarterly; background jobs use Vault-issued tokens for third-party integrations.
-
-## Observability
-- Metrics: publish count, pending approvals, job queue depth, API latency histograms.
-- Logs: structured JSON with `trace_id`, `article_id`, sanitized payload.
-- Traces: OpenTelemetry instrumentation around workflow transitions, DB queries, cache usage.
-- Dashboards: editorial throughput, localization coverage, API success rate. Alerts on queue backlog, publish failures, 5xx spikes, SLA breaches (>48 h pending review).
-
-## Operations
-- CI builds Go binaries, packages container via multi-stage Dockerfile; run unit/integration tests on `self-hosted,k8s` runners.
-- Migrations executed via Kubernetes Job Hook before deployment.
-- Blue/green or canary rollout handled by Argo CD; ensure read-only replicas scale for Content API traffic.
-- Backups: nightly PostgreSQL snapshot, object storage versioning for media. DR runbook restores DB, replays latest Kafka events if needed, validates API.
-- Runbooks: emergency unpublish, workflow override, search reindex, translation backlog triage.
-
-## Roadmap
-1. **Phase 1**: MVP (core CRUD, workflow, scheduling start, REST delivery).
-2. **Phase 2**: Unpublish scheduling, Slack/email notifications, search via Elasticsearch.
-3. **Phase 3**: GraphQL delivery, translation tooling (import/export), analytics dashboard.
-4. **Phase 4**: Multi-space tenancy, external contributor portal, experimentation (A/B), personalization hooks.
-
-## Open Questions
-- Background processing engine (internal queue vs. Temporal/CronJob).
-- Preferred localization tooling (built-in vs external vendor integration).
-- Governance for taxonomy updates (who owns categories/tags).
-- Triggering search updates: push events vs. periodic reindex.
+## Tooling Enhancements (Roadmap)
+1. Generate human-readable release notes from config diffs to share with stakeholders.
+2. Add policy-as-code checks (OPA) covering key namespaces, TTL bounds, and ACL scope.
+3. Automate tagging of configuration releases so applications can correlate runtime behavior with config versions.
+4. Integrate Slack notifications for pending approvals and failed validations.
+5. Build dashboards that correlate config changes with service health to detect regressions faster.
 
 ## References
-- Identity blueprint (`designs/authentication.md`)
-- Consul/API Gateway design (`designs/consul.md`)
-- MinIO storage design (`designs/minio-content-server.md`)
-- Search stack (`designs/search-elasticsearch.md`)
+- `01_conf_mgmt/config-management.md` for platform responsibilities.
+- `01_conf_mgmt/consul.md` and `01_conf_mgmt/mesh-gateway.md` for infrastructure specifics.
+- `SystemReqs.md` and ADRs under `01_conf_mgmt/adr/` for policy decisions.

@@ -83,7 +83,7 @@ Add specialized labels (`gpu`, `arm64`) by registering additional RunnerDeployme
 5. Decide whether Terraform infrastructure should also flow through Argo CD or remain in dedicated pipelines.
 
 ## References
-- Observability platform blueprint (`designs/observability-platform.md`)
-- Identity blueprint (`designs/authentication.md`)
-- Container image versioning & tagging (`designs/docker-image-versioning.md`)
+- Observability platform blueprint (`03_telemetry/observability-platform.md`)
+- Identity blueprint (`11_athentik_user/authentication.md`)
+- Container image versioning & tagging (`00_coding_req/docker-image-versioning.md`)
 - Argo CD docs: <https://argo-cd.readthedocs.io/>

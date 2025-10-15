@@ -1,75 +1,83 @@
 # Kafka Messaging Bus
 
 ## Purpose
-Provide a durable event backbone so services share data asynchronously, decouple deployment lifecycles, and implement the claim-check pattern for large media assets.
+Kafka underpins Layer 4 of the MyFarsi platform by providing durable, replayable events that connect ingestion, persistence, enrichment, and presentation services. This document updates the messaging design to match the architecture outlined in `ARCHITECTURE.md`, the requirements in `SystemReqs.md`, and the data retention policy in `22_db_back/adr/0001-data-retention.md`.
 
-## Cluster Topology
-- Kafka 3.x (KRaft mode) with three brokers per environment; dedicated ZooKeeper-free configuration.
-- Listeners:
-  - `INTERNAL_PLAINTEXT` (home dev only)
-  - `INTERNAL_TLS` for cluster-internal SASL/OAUTHBEARER
-  - `EXTERNAL_TLS` for ingress via Consul API Gateway if needed
-- Storage: SSD-backed volumes sized for 7–30 day retention; monitor disk > 70%.
-- Quorum voters colocated with brokers; metadata quorum of 3 to tolerate single failure.
-- Use Strimzi or Confluent Operator for Kubernetes deployment; include Cruise Control for balancing.
+## Cluster Architecture
+- **Version & Mode**: Kafka 3.x running in KRaft mode (no ZooKeeper) with three brokers per environment (staging, production). Development environments may run single-node clusters for convenience.
+- **Hardware**: Brokers run on the Equinix Metal-backed Kubernetes worker pool or dedicated VMs, using SSD/NVMe storage sized for 30 days of retention with headroom to avoid exceeding 70% disk utilization.
+- **Listeners**:
+  - `INTERNAL_TLS`: mTLS for broker-to-broker and internal client traffic.
+  - `CLIENT_TLS`: Authenticated client access (producers/consumers) within the mesh.
+  - `EDGE_TLS` (optional): Exposed through API Gateway for approved external consumers.
+- **Controller Quorum**: Three KRaft controllers colocated with brokers to tolerate single-node failure.
+- **Deployment**: Managed by Strimzi operator (preferred) or Confluent Platform on Kubernetes. Cruise Control handles balancing; MirrorMaker 2 reserved for future DR/multi-region work.
 
-## Supporting Services
-- **Schema Registry**: Avro/Protobuf schemas with backward-compatibility checks; stored in Git for review.
-- **Kafka Connect**: Optional for integrations (Postgres CDC, MinIO events).
-- **Kafka Exporter / JMX Exporter**: Prometheus metrics.
-- **Burrow or Kafka Lag Exporter**: Consumer lag monitoring.
-- **MirrorMaker 2**: Future cross-region replication + DR.
+## Supporting Components
+- **Schema Registry**: Hosts Avro/JSON Schema/Protobuf definitions with backward compatibility enforced. Schemas live in `schemas/<domain>/<topic>.avsc` and publish via GitOps.
+- **Kafka Exporter & JMX Exporter**: Prometheus metrics collectors deployed per cluster.
+- **Burrow/Kafka Lag Exporter**: Monitors consumer lag and integrates with alerting.
+- **Kafka Connect**: Optional connectors for Postgres CDC, MinIO events, and external sinks; deployed when needed with dedicated namespaces.
+- **Access Tooling**: GitOps-managed ACL definitions (`acls/*.yaml`) rendered into Kafka via automation pipelines.
 
-## Client Standards
-- Producers: `acks=all`, idempotence enabled, retries with exponential backoff, request timeout 30 s.
-- Consumers: use consumer groups, `enable.auto.commit=false`, commit after processing; handle poison messages via retry/DLQ topics.
-- Serialization: Avro/Protobuf using common libraries; schema stored under `schemas/<domain>/<topic>.avsc`.
-- Configuration delivered via Consul KV/`config-cli` (see `designs/config-cli.md` for entrypoint behavior).
-- Provide SDK/sidecar examples in Go and Python with consistent retry and circuit-breaker behavior.
+## Topic Standards
+- **Naming**: `<domain>.<event>.v<number>` (e.g., `media.raw_ingest.v1`, `media.ingested.v1`).
+- **Partitioning**: Stable keys such as asset IDs or tenant IDs maintain ordering. Start with six partitions; scale based on throughput/SLA.
+- **Replication Factor**: Three in staging/production, one in local development.
+- **Retention**:
+  - Raw ingest topics: 30 days to allow reprocessing.
+  - Processed events: 14 days.
+  - Audit/compacted topics: 90 days with log compaction enabled.
+- **Compaction**: Enabled for stateful topics (`media.metadata_snapshot.v1`).
+- **Schema Evolution**: Backward compatible by default. Breaking changes require major version (e.g., `v2`) and ADR review.
+- **ACLs**: Producers limited to Write/Describe on their topics; consumers limited to Read/Describe. Managed via GitOps using service identities from Consul/Vault.
 
-## Topic Design
-- Naming convention: `<domain>.<event>.<version>` (e.g., `media.raw-ingest.v1`, `media.ingested.v1`).
-- Partitioning: stable key (e.g., asset ID) to maintain ordering; default 6 partitions; adjust for throughput.
-- Replication factor: 3 (staging/prod), 1 (home dev).
-- Retention tiers:
-  - Raw ingest: 30 d (allow reprocessing).
-  - Processed events: 7–14 d.
-  - Audit topics: 90 d (compacted).
-- Compaction for state topics (e.g., metadata snapshots).
-- Access control via ACL bundles; producers limited to write on specific topics, consumers to read.
+## Client Guidelines
+- **Producers**:
+  - `acks=all`, `enable.idempotence=true`.
+  - Retries with exponential backoff; log and surface failures to observability stack.
+  - Include headers for `service.name`, `deployment.env`, and `schema.version`.
+- **Consumers**:
+  - Use consumer groups; disable auto commit.
+  - Commit offsets after successful processing; handle retries and DLQ handoffs.
+  - Track lag metrics and integrate with Burrow alerts.
+- **Serialization**: Avro (preferred) or Protobuf using shared libraries. Include schema references (`schema.registry.url`, subject).
+- **Configuration Delivery**: All clients bootstrap via `config-cli` pulling broker endpoints, credentials, and topic names from Consul KV (`01_conf_mgmt/config-management.md`).
 
 ## Operations & Observability
-- Metrics to track: under-replicated partitions, offline partitions, ISR shrink, request latency, consumer lag, broker disk usage.
-- Alerts:
-  - URP > 0 for >5 m (critical)
-  - Consumer lag above threshold (per service)
-  - Disk usage >80%
-  - Controller election frequency anomalies
-- Logging centralized via Fluent Bit; audit logs retained 90 d.
-- Cruise Control automates rebalancing after broker addition/removal; require change approvals.
-- Backups: nightly partition dumps (optional) or rely on MirrorMaker replication.
+- **Metrics**: Monitor under-replicated partitions, offline partitions, ISR counts, controller changes, request latency, throughput, consumer lag, disk usage, and network utilization.
+- **Alerts**:
+  - URP > 0 for 5 minutes (critical).
+  - Consumer lag above service-specific thresholds.
+  - Disk usage > 80%.
+  - Controller election frequency spikes.
+  - Cruise Control rebalance failures.
+- **Logging**: Brokers stream logs through Fluent Bit to Loki; retain 90 days. Audit logs capture ACL changes and administrative operations.
+- **Backup/Recovery**: MirrorMaker 2 for cross-cluster replication (Phase 3). For interim recovery, maintain documented procedures for partition dumps using `kafka-exporter` or object storage snapshots.
+- **Testing**: Integration tests for publishers/consumers run in CI using ephemeral Kafka (testcontainers) and schema registry mocks.
 
 ## Security
-- mTLS between brokers and clients; certs issued by Vault PKI with automated rotation.
-- SASL/OAUTHBEARER tokens minted via Authentik or dedicated OAuth provider; short-lived (1 h).
-- ACL management automated via GitOps (YAML definitions → Kafka ACL tool).
-- Secrets stored in ExternalSecrets; no static passwords.
-- Enable encryption at rest if storage supports; otherwise rely on disk-level encryption.
+- **Authentication**: mTLS via Vault-issued certificates for internal services. OAuth/OIDC tokens (minted via Authentik) for human tooling or external consumers.
+- **Authorization**: Kafka ACLs generated from GitOps manifests; automation pipelines apply changes post-review.
+- **Encryption**: TLS for all listeners; storage encryption handled by infrastructure (encrypted disks).
+- **Secrets**: Stored in Vault and delivered via ExternalSecrets or `config-cli`. No secrets committed to Git.
+- **Compliance**: Align with EU residency requirements; avoid replicating data outside EU without additional ADR approval.
 
-## Governance
-- Change review for new topics: include schema, retention, owners, SLAs.
-- Schema Registry compatibility: backward by default; break glass for major version changes.
-- Document event catalog (producer, consumer, payload) in `docs/events.md`.
-- Monitor DLQ volume; create runbooks for remediation.
+## Governance & Runbooks
+- Topic creation requires a change request documenting producers, consumers, schema references, and retention rationale. Maintain event catalog in `docs/event-catalog.md`.
+- Schema changes follow review checklist: compatibility check, fixture updates, contract tests.
+- DLQ runbook defines triage, reprocess, and discard procedures. Monitor DLQ volume and include KPIs in service dashboards.
+- Incident playbooks cover broker failure, topic saturation, and schema incompatibility.
 
 ## Roadmap
-1. Phase 1: Stand up cluster (Strimzi helm), Schema Registry, baseline topics (raw ingest, ingested, audit).
-2. Phase 2: Add Burrow/Kafka Lag Exporter, Cruise Control, GitOps-managed ACLs.
-3. Phase 3: Introduce MirrorMaker for DR, Connect connectors (Postgres CDC), automated schema tests in CI.
-4. Phase 4: Multi-tenant quotas, tiered storage evaluation, schema evolution tooling (compatibility checks in PRs).
+1. **Phase 1**: Provision Kafka via Strimzi, deploy Schema Registry, establish baseline topics for raw ingest (`media.raw_ingest.v1`) and processed events (`media.ingested.v1`), integrate with observability.
+2. **Phase 2**: Add Burrow/Kafka Lag Exporter, Cruise Control, GitOps-managed ACLs, and schema validation pipelines.
+3. **Phase 3**: Configure MirrorMaker 2 for disaster recovery, introduce Kafka Connect for Postgres CDC and MinIO event sinks.
+4. **Phase 4**: Implement multi-tenant quotas, evaluate tiered storage, automate schema compliance checks in PR workflows, and extend event catalog automation.
 
 ## References
-- Architecture blueprint (`designs/ARCHITECTURE.md`)
-- Content ingestion (`designs/content-management.md`)
-- Storage pipeline (`designs/minio-content-server.md`)
-- Observability (`designs/observability-platform.md`)
+- `ARCHITECTURE.md` and `DESIGN.md` for end-to-end workflow context.
+- `SystemReqs.md` for Layer 4 requirements and roadmap alignment.
+- `01_conf_mgmt/config-management.md` for configuration delivery and bootstrap guidance.
+- `22_db_back/adr/0001-data-retention.md` for retention/residency constraints.
+- `03_telemetry/observability-platform.md` for monitoring integrations.

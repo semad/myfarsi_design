@@ -42,7 +42,7 @@ Forward-Auth Service ──► Redis (sessions)
 
 ## Deployment Model
 - Namespace: `auth`.
-- Delivery: official Authentik Helm chart templated with `config-cli render authentik` (see `designs/config-cli.md` for templating workflow).
+- Delivery: official Authentik Helm chart templated with `config-cli render authentik` (see `90_cli_tools/config-cli.md` for templating workflow).
 - Pods:
   - `ak-server` (web/API) with horizontal pod autoscaler.
   - `ak-worker` for background jobs.
@@ -129,6 +129,6 @@ Headers and cookies follow the `auth.<env>.myfarsi.dev` domain standard; TTLs al
 - Expand social login coverage (Apple, Twitter) upon product sign-off.
 
 ## References
-- ADR 002 (`designs/adr/002-authentik-subsystem-decisions.md`)
+- ADR 002 (`11_athentik_user/adr/002-authentik-subsystem-decisions.md`)
 - Forward-auth integration guide (`0_mediaInfra/00_consul_mesh/envoy/README.md`)
 - Authentik documentation: <https://docs.goauthentik.io/>

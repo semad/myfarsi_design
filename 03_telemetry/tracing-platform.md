@@ -68,6 +68,6 @@ Services (Go, Node, Python) ─► OpenTelemetry SDKs ─► OTLP ─► OpenTel
 4. Phase 4: Multi-region trace aggregation, optional export to managed APM, retention extension for compliance.
 
 ## References
-- Observability platform (`designs/observability-platform.md`)
-- Logic Router (`designs/logic-router.md`)
+- Observability platform (`03_telemetry/observability-platform.md`)
+- Logic Router (`51_Presentation_back/logic-router.md`)
 - Service-specific designs for instrumentation points.

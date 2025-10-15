@@ -5,12 +5,12 @@ Private registry backing Layer 1 CI/CD pipelines. It stores build artifacts, s
 
 ## Deployment Model
 - Base image: `registry:3` (Docker Distribution).
-- Wrapped by `config-cli run docker-registry` to load configuration from Consul and register health checks (see `designs/config-cli.md`).
+- Wrapped by `config-cli run docker-registry` to load configuration from Consul and register health checks (see `90_cli_tools/config-cli.md`).
 - Runs as StatefulSet in `cicd` namespace with PVC-based storage or S3/MinIO backend depending on environment.
 - Exposes port `5000` (HTTPS via mesh sidecar) and optional `/metrics` endpoint for Prometheus.
 
 ## Configuration Flow
-1. `config-cli` fetches Consul KV under `registry/<env>/` (details in `designs/config-cli.md`).
+1. `config-cli` fetches Consul KV under `registry/<env>/` (details in `90_cli_tools/config-cli.md`).
 2. Keys map to env vars (`REGISTRY_STORAGE_*`, `REGISTRY_AUTH_*`, `REGISTRY_HTTP_TLS_*`).
 3. Service registered with Consul, health-checked via `/v2/`.
 4. Registry process starts; on SIGTERM `config-cli` deregisters and stops gracefully.
@@ -39,5 +39,5 @@ Private registry backing Layer 1 CI/CD pipelines. It stores build artifacts, s
 - **Incident Response**: On suspected compromise, revoke tokens, clear cached credentials, rotate TLS certs, rebuild images from source and republish.
 
 ## References
-- CI/CD platform (`designs/cicd-runner.md`)
-- Storage guidelines (`designs/minio-content-server.md`)
+- CI/CD platform (`02_cicd_mgmt/cicd-runner.md`)
+- Storage guidelines (`21_content_manager/minio-content-server.md`)

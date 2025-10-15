@@ -69,6 +69,6 @@ jobs:
 4. Phase 4: Migrate to dedicated CDN (S3/CloudFront or Cloudflare Pages) while keeping GitHub outputs as backup.
 
 ## References
-- GitOps layout (`designs/gitops-repository.md`)
-- Observability (`designs/observability-platform.md`)
-- Home edge fallback (`designs/home-edge-deployment.md`)
+- GitOps layout (`02_cicd_mgmt/gitops-repository.md`)
+- Observability (`03_telemetry/observability-platform.md`)
+- Home edge fallback (`10_datacenters_setup/home-edge-deployment.md`)

@@ -72,8 +72,8 @@ Services/Agents ──► OpenTelemetry Collector ──► Prometheus (metrics)
 4. Phase 4: Multi-cluster federation (Thanos, Loki ruler), anomaly detection, business-level observability (user journeys, funnel analytics).
 
 ## References
-- Identity (`designs/authentication.md`)
-- Content (`designs/content-management.md`)
-- Storage (`designs/minio-content-server.md`)
-- Search (`designs/search-elasticsearch.md`)
-- CI/CD (`designs/cicd-runner.md`)
+- Identity (`11_athentik_user/authentication.md`)
+- Content (`01_conf_mgmt/content-management.md`)
+- Storage (`21_content_manager/minio-content-server.md`)
+- Search (`23_search_back/search-elasticsearch.md`)
+- CI/CD (`02_cicd_mgmt/cicd-runner.md`)

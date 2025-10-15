@@ -1,122 +1,117 @@
 # Platform Architecture Blueprint
 
 ## Purpose
-Outline how MyFarsi services interact across ingestion, storage, and delivery so teams share a single mental model when extending the platform or introducing new workloads.
+Provide a current, navigable view of how MyFarsi's media platform fits together so teams can evolve the stack without guessing at cross-domain dependencies or hidden assumptions.
 
-## Service Domains
-- **Configuration Management System** (namespace/cluster `platform-config`) operates its own Consul and Vault instances, exposes `config-cli` artifacts, and doubles as the configuration backbone for CI/CD runners and pipelines (see `designs/config-management.md`, `designs/config-cli.md`, `designs/consul.md`).
-- **Authentication System** (namespace/cluster `authn`) hosts Authentik + forward-auth with a dedicated Consul/Vault pair for its runtime needs (`designs/authentication.md`).
-- **Media Business Logic** (namespace/cluster `media-core`) houses ingestion, catalog, and processing services with their own Consul/Vault (`designs/media-platform.md` plus subsystem designs).
+## Domain Map
+Services are grouped by numbered directories at the repo root. Treat each directory as the source of truth for designs and runbooks.
 
-Each domain runs independently; cross-domain dependencies are limited to published APIs (e.g., Authentik OIDC) and shared ingress for Consul when consuming configuration from the configuration management system.
+| Domain | Scope | Key References |
+| --- | --- | --- |
+| Configuration Backbone | Consul, Vault, mesh gateways, config tooling | `01_conf_mgmt/config-management.md`, `01_conf_mgmt/consul.md`, `01_conf_mgmt/mesh-gateway.md`, `90_cli_tools/config-cli.md` |
+| CI/CD & Image Supply | Runners, registry, GitOps automation | `02_cicd_mgmt/cicd-runner.md`, `02_cicd_mgmt/docker-registry.md`, `02_cicd_mgmt/gitops-repository.md` |
+| Observability | Telemetry collection, tracing, dashboards | `03_telemetry/observability-platform.md`, `03_telemetry/tracing-platform.md` |
+| Data Plane | Storage, APIs, search | `22_db_back/postgres-api-platform.md`, `21_content_manager/minio-content-server.md`, `23_search_back/search-elasticsearch.md` |
+| Messaging Core | Durable event transport | `20_central_bus/kafka-messaging-bus.md` |
+| Media Workflow | Ingestion, processing, presentation | `31_Extraction/media-platform.md`, `51_Presentation_back/logic-router.md`, `52_Presentation_front/` (placeholder) |
+| Access & Identity | Authentik, forward-auth | `11_athentik_user/authentication.md`, `11_athentik_user/authentik-hybrid-identity.md` |
+
+Shared orientation docs live at `DESIGN.md`, `SystemReqs.md`, and `AGENTS.md`. Update them whenever you add or retire a domain.
 
 ## High-Level Topology
-The system follows a layered claim-check pattern: clients submit media to the edge, metadata travels over Kafka, and downstream services hydrate persistent stores. Cross-cutting concerns—schema governance, configuration, observability—sit beside the runtime path to keep feature services focused on business logic.
+The platform follows a layered claim-check model: clients hand off media at the edge, Kafka propagates pointer events, and downstream services hydrate storage, indexing, and derived assets. Cross-cutting services (configuration, observability, schema governance) sit beside the runtime path so feature teams can focus on business logic while relying on consistent platform primitives.
 
 ```mermaid
 graph TD;
-    subgraph "User / External"
-        Client([Client / mediaCli])
+    subgraph "User / Edge"
+        Client([Client / mediaCli-web])
+        Gateway(API Gateway)
     end
 
-    subgraph "Layer 5 · Business APIs"
-        APIGateway(API Gateway)
-        IngestionServices(Ingestion Services<br/>file-upload-api · telegram-ingestor)
-        StoragePersistor(Storage Persistor)
-        ProcessingServices(Processing Services<br/>pdfProcessor)
+    subgraph "Layer 5 - Business Services"
+        IngestSvc(Ingestion Services<br/>file-upload-api / telegram-ingestor)
+        PersistSvc(Storage Persistor)
+        ProcessSvc(Processing Services<br/>pdfProcessor / thumbnailer)
     end
 
     subgraph "Cross-Cutting"
-        Kafka((Kafka · Durable Bus))
+        Kafka((Kafka))
         SchemaRegistry[(Schema Registry)]
     end
 
-    subgraph "Layer 4 · Data Plane"
-        PostgREST(PostgREST API)
-        PostgreSQL[(PostgreSQL · Media Catalog)]
-        MinIO[(MinIO · Object Storage)]
+    subgraph "Layer 4 - Data Plane"
+        PostgREST(PostgREST)
+        PostgreSQL[(PostgreSQL)]
+        MinIO[(MinIO Object Storage)]
+        Search[(Search Index)]
     end
 
-    subgraph "Layer 3 · Observability"
-        direction LR;
-        OTelCollector(OpenTelemetry Collector)
+    subgraph "Layer 3 - Observability"
+        OTel(OpenTelemetry Collector)
         Prometheus(Prometheus)
-        Jaeger(Jaeger Tracing)
-        Grafana(Grafana)
-        Logging(Centralized Logging)
+        Jaeger(Jaeger)
+        Logging(Log Aggregation)
     end
 
-    subgraph "Layer 2 · Platform"
-        direction LR;
-        Vault(Vault)
+    subgraph "Layer 2 - Platform"
         Consul(Consul)
+        Vault(Vault)
+        MeshGateway(Envoy Mesh Gateway)
     end
 
-    Client -- "1. ingest request" --> APIGateway
-    APIGateway -- "2. route" --> IngestionServices
-    IngestionServices -- "3a. stage file" --> MinIO
-    IngestionServices -- "3b. enqueue pointer" --> Kafka
-    Kafka -- "4. raw event" --> StoragePersistor
-    StoragePersistor -- "5. move file" --> MinIO
-    StoragePersistor -- "6. persist metadata" --> PostgREST
-    PostgREST -- "SQL" --> PostgreSQL
-    StoragePersistor -- "7. publish ingested" --> Kafka
-    Kafka -- "8. consumed event" --> ProcessingServices
-    ProcessingServices -- "9. fetch artifact" --> MinIO
-    ProcessingServices -- "10. enrich metadata" --> PostgREST
-    IngestionServices -. "schema check" .-> SchemaRegistry
-    StoragePersistor -. "schema check" .-> SchemaRegistry
-    ProcessingServices -. "schema check" .-> SchemaRegistry
-    IngestionServices -- "telemetry" --> OTelCollector
-    ProcessingServices -- "telemetry" --> OTelCollector
-    StoragePersistor -- "telemetry" --> OTelCollector
-    APIGateway -- "telemetry" --> OTelCollector
-    OTelCollector -- "metrics" --> Prometheus
-    OTelCollector -- "traces" --> Jaeger
-    OTelCollector -- "logs" --> Logging
-    Prometheus --> Grafana
-    Jaeger --> Grafana
-    ProcessingServices -- "config/secrets" --> Consul
-    ProcessingServices -- "config/secrets" --> Vault
-    IngestionServices -- "config/secrets" --> Consul
-    IngestionServices -- "config/secrets" --> Vault
-    StoragePersistor -- "config/secrets" --> Consul
-    StoragePersistor -- "config/secrets" --> Vault
-    APIGateway -- "config/secrets" --> Consul
-    APIGateway -- "config/secrets" --> Vault
+    Client --> Gateway
+    Gateway --> IngestSvc
+    IngestSvc -- stage artifact --> MinIO
+    IngestSvc -- event --> Kafka
+    Kafka --> PersistSvc
+    PersistSvc -- move artifact --> MinIO
+    PersistSvc -- metadata --> PostgREST
+    PostgREST --> PostgreSQL
+    PersistSvc -- ingested event --> Kafka
+    Kafka --> ProcessSvc
+    ProcessSvc -- derived asset --> MinIO
+    ProcessSvc -- enrich metadata --> PostgREST
+    ProcessSvc --> Search
+    IngestSvc -. schema check .-> SchemaRegistry
+    PersistSvc -. schema check .-> SchemaRegistry
+    ProcessSvc -. schema check .-> SchemaRegistry
+    IngestSvc --> OTel
+    PersistSvc --> OTel
+    ProcessSvc --> OTel
+    Gateway --> OTel
+    OTel --> Prometheus
+    OTel --> Jaeger
+    OTel --> Logging
+    IngestSvc --> Consul
+    PersistSvc --> Consul
+    ProcessSvc --> Consul
+    IngestSvc --> Vault
+    PersistSvc --> Vault
+    ProcessSvc --> Vault
+    Gateway --> MeshGateway
 ```
 
 ## Layer Responsibilities
-- **Business APIs (Layer 5)** Own request validation, protocol translation, and orchestration. Each service emits domain events rather than calling downstream synchronously.
-- **Cross-Cutting Services** Kafka plus Schema Registry provide durable messaging and contract enforcement. They decouple producers/consumers and protect downstream services from breaking changes.
-- **Data Plane (Layer 4)** PostgREST fronts PostgreSQL for CRUD access, while MinIO stores raw binaries. StoragePersistor is the bridge that materializes metadata and moves objects.
-- **Observability (Layer 3)** OpenTelemetry Collector aggregates traces, metrics, and logs, fanning out to Prometheus, Jaeger, and logging sinks so teams troubleshoot with consistent context.
-- **Platform (Layer 2)** Consul and Vault distribute configuration, service discovery, and secrets; they backstop zero-trust networking and environment bootstrap. Containers typically launch via `config-cli` (see `designs/config-cli.md`) to hydrate configuration from Consul before starting workloads.
+- **Layer 5 - Business Services** Handle protocol mediation, validation, orchestration, and publish immutable events instead of chaining synchronous calls. Each service exposes OTLP telemetry and registers with Consul.
+- **Layer 4 - Data Plane** PostgREST fronts PostgreSQL for metadata, MinIO stores binaries, and search backends index enriched content. The Storage Persistor is the authoritative bridge between Kafka pointers and durable state.
+- **Messaging & Schema** Kafka supplies durable, replayable events; Schema Registry enforces compatibility. Topics map to domain events (`media_ingested`, `asset_enriched`, etc.).
+- **Layer 3 - Observability** OpenTelemetry Collector normalizes signals from all services, routing metrics to Prometheus, traces to Jaeger, and logs to the chosen aggregation backend. Dashboards and alerts are documented in `03_telemetry/observability-platform.md`.
+- **Layer 2 - Platform** Consul delivers configuration and service discovery, Vault issues identities and secrets, and Envoy-based gateways provide north-south and east-west policy control. Services bootstrap configuration through `config-cli` before starting workloads.
+- **Layer 1 - CI/CD (out of scope for this doc)** Lives in `02_cicd_mgmt/` and seeds artifacts consumed by the layers above.
 
 ## Core Workflows
-1. **Ingestion** Clients upload media through the API Gateway; ingestion services stage the binary in MinIO and post a pointer event.
-2. **Persistence** StoragePersistor consumes the raw event, moves objects into long-term storage, and records metadata through PostgREST.
-3. **Processing** Processing services react to the ingested topic, enrich assets, and publish downstream updates.
-4. **Observability** Every hop emits telemetry via OTLP; dashboards and alerts align on shared signal names.
+1. **Ingestion**: gateway forwards validated uploads to ingestion services, which stage objects in MinIO and emit pointer events on Kafka. Config and secrets are fetched from Consul/Vault at startup and refreshed on demand.
+2. **Persistence**: storage persistor consumes pointer events, performs idempotent moves to durable buckets, writes metadata via PostgREST, and publishes `media_ingested`.
+3. **Processing**: downstream processors subscribe to relevant topics, fetch artifacts, enrich metadata, update search indexes, and emit follow-on events for additional consumers.
+4. **Observability**: every hop ships logs/metrics/traces via OTLP. Golden signals (ingestion latency, Kafka lag, error rate) must remain within SLOs captured in `03_telemetry/observability-platform.md`.
 
-## Operational Considerations
-- Use KRaft-based Kafka with three brokers and triple replication to survive AZ loss.
-- Schema Registry enforces backward compatibility before promotion.
-- Vault-issued identities secure service-to-service calls and limit blast radius.
-- Consul service mesh governs traffic policies, while API Gateway enforces edge security.
-
-## Reference Designs
-- Configuration management tooling: `designs/config-cli.md`, `designs/consul.md`
-- Configuration management system overview: `designs/config-management.md`
-- Identity stack: `designs/authentication.md`, `designs/adr/002-authentik-subsystem-decisions.md`
-- Media services: `designs/media-platform.md`, `designs/content-management.md`, `designs/minio-content-server.md`, `designs/postgres-api-platform.md`, `designs/search-elasticsearch.md`, `designs/kafka-messaging-bus.md`
-- Mesh gateways: `designs/mesh-gateway.md`
-- Image versioning & tagging: `designs/docker-image-versioning.md`
-- Observability & tracing: `designs/observability-platform.md`, `designs/tracing-platform.md`
-- CI/CD runners and GitOps: `designs/cicd-runner.md`, `designs/gitops-repository.md`
-- Overall platform guidance: `designs/DESIGN.md`
+## Operational Guardrails
+- **Resilience**: run Kafka in KRaft mode with RF=3, enable MinIO versioning, and rotate Vault tokens automatically. Validate failover drills quarterly (broker loss, MinIO outage, Vault unavailability).
+- **Contracts**: Schema evolution requires compatibility checks and fixture updates. Reference sample payloads in `20_central_bus/kafka-messaging-bus.md`.
+- **Security**: Never embed secrets in manifests; rely on Vault paths and Consul ACLs. Document policy changes in the owning domain directory.
+- **Change Management**: Architectural changes must update this blueprint plus domain-specific docs. Capture consequential shifts in ADRs inside the relevant directory (e.g., `20_central_bus/adr/` when created).
 
 ## Next Actions
-1. Codify the diagram in the architecture ADR to keep drift in check.
-2. Validate failover paths quarterly (Kafka broker loss, MinIO outage, Vault unavailability).
-3. Expand the model with data residency annotations once multi-region work begins.
+1. Publish a lightweight ADR index (one per domain) so new decisions remain traceable.
+2. Extend the diagram with control-plane components (CI/CD runners, config-cli flow) once those services move beyond design.
+3. Annotate data residency and retention expectations ahead of multi-region expansion.

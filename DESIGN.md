@@ -1,75 +1,41 @@
 # Backend Media Server Overview
 
-MyFarsi’s backend platform ingests media from heterogeneous sources, stores artifacts durably, and exposes curated assets through secure APIs. This document restates the layered reference architecture, the event-driven flow, and the operational guardrails that keep the system resilient.
+MyFarsi's backend media platform ingests heterogeneous content, persists binaries and metadata durably, and exposes curated assets through well-governed APIs. This overview extends `ARCHITECTURE.md` with design intent, contract details, and operational guardrails for each layer.
 
-## Layered Architecture
-```
-Layer 5 ─ Business Logic & APIs
-Layer 4 ─ Data & Storage
-Layer 3 ─ Observability
-Layer 2 ─ Config, Secrets & Mesh
-Layer 1 ─ CI/CD & Build Infra
-```
+## Layered Stack
+The platform layers map to the numbered directories in the repo. Treat the layers as seams for ownership and deployment.
 
-### Layer 1 · CI/CD & Build Infrastructure
-- GitHub Actions backed by self-hosted runners (`designs/cicd-runner.md`) handle build, test, scan, and deployment automation.
-- Container images published to private Docker registry; provenance tracked via build metadata.
-- Makefiles standardize local and CI workflows across services.
+- **Layer 1 - CI/CD & Build Infrastructure** (`02_cicd_mgmt/`)<br>
+  Self-hosted runners, registry, and GitOps tooling create signed artifacts and promote changes through environments. Each service exports a `Makefile` target consumed by the pipelines. See `02_cicd_mgmt/cicd-runner.md` and `02_cicd_mgmt/docker-registry.md`.
+- **Layer 2 - Configuration, Secrets & Mesh** (`01_conf_mgmt/`)<br>
+  Consul supplies runtime configuration, DNS, and service discovery; Vault issues workload identities and secrets; Envoy-based mesh gateways enforce ingress and east-west policy (`01_conf_mgmt/consul.md`, `01_conf_mgmt/mesh-gateway.md`). Workloads bootstrap via `90_cli_tools/config-cli.md`.
+- **Layer 3 - Observability** (`03_telemetry/`)<br>
+  OpenTelemetry Collector receives OTLP signals and routes metrics to Prometheus, traces to Jaeger, and logs to the central aggregation stack (`03_telemetry/observability-platform.md`, `03_telemetry/tracing-platform.md`). Dashboards monitor ingestion latency, Kafka lag, error budgets, and storage health.
+- **Layer 4 - Data & Storage** (`20_`, `21_`, `22_`, `23_` directories)<br>
+  PostgreSQL (fronted by PostgREST) stores metadata, MinIO holds binaries, search services index derived content, and Kafka provides durable fan-out (`22_db_back/postgres-api-platform.md`, `21_content_manager/minio-content-server.md`, `23_search_back/search-elasticsearch.md`, `20_central_bus/kafka-messaging-bus.md`).
+- **Layer 5 - Business Logic & APIs** (`31_`, `40_`, `50_`, `51_`, `52_` directories)<br>
+  Ingestion, enrichment, and presentation services orchestrate claim-check workflows, emit domain events, and expose authenticated APIs (`31_Extraction/media-platform.md`, `51_Presentation_back/logic-router.md`, `50_public_cms/` roadmap).
 
-### Layer 2 · Configuration, Secrets & Mesh
-- Consul provides service discovery, KV configuration, and Connect service mesh (`designs/consul.md`).
-- Vault stores credentials, issues mTLS identities, and integrates with Consul Connect for certificate rotation.
-- Consul API Gateway (Envoy) fronts external traffic, integrates with forward-auth for Authentik SSO.
+## Event-Driven Flow
+1. **Ingest**: Clients authenticate via the API gateway. Ingestion services validate payloads, stage binaries in MinIO, record pre-ingest metadata, and publish pointer events on Kafka topics (`ingest.raw`).
+2. **Persist**: Storage Persistor consumes pointer events, performs idempotent moves to durable buckets, writes normalized metadata through PostgREST, and emits `media.ingested`.
+3. **Enrich**: Processing services subscribe to `media.ingested`, fetch assets, derive representations (text extraction, thumbnails), update metadata/search indexes, and emit follow-on events such as `media.enriched`.
+4. **Serve**: Presentation services answer queries via REST/GraphQL endpoints, combining PostgREST data with search indices. Edge access uses Authentik-issued tokens and mesh policies.
 
-### Layer 3 · Observability
-- OpenTelemetry SDKs in every service export traces, metrics, and logs to the OpenTelemetry Collector.
-- Prometheus stores metrics, Tempo/Jaeger hold traces, Loki aggregates logs; Grafana visualizes all three.
-- Standard dashboards track ingestion throughput, Kafka lag, API latency, storage health.
+Exactly-once semantics are approximated with Kafka idempotent producers, transactional writes, and idempotent consumers. Dead-letter topics capture poison events; runbooks for redrive live beside each service.
 
-### Layer 4 · Data & Storage
-- PostgreSQL (via PostgREST) persists structured metadata and operational state.
-- MinIO/S3 holds all binary media with lifecycle policies.
-- Redis supplies ephemeral caching/queues where needed.
-- Schema Registry governs Kafka payload schemas.
+## Cross-Cutting Design Decisions
+- **Contracts**: All event payloads register JSON schemas in Schema Registry. Pull requests that modify schemas must update fixtures and compatibility tests (`20_central_bus/kafka-messaging-bus.md`).
+- **Identity**: Authentik manages user and service identities; mesh mTLS plus Vault-issued certificates secure service calls (`11_athentik_user/authentication.md`).
+- **Configuration Policy**: Consul KV is the canonical configuration store; changes go through GitOps workflows. Services read configuration at startup and watch for changes when supported.
+- **Security Posture**: Secrets never enter repositories. Vault + ExternalSecrets deliver runtime credentials. Every public endpoint enforces Authentik or gateway JWT validation.
+- **Governance**: Architectural decisions are tracked via per-domain ADRs (create `adr/` subdirectories as designs evolve). `AGENTS.md` sets repo-wide contribution rules.
 
-### Layer 5 · Business Logic & APIs
-- API Gateway accepts client traffic (`mediaCli`, web apps), enforces auth, applies rate limits.
-- Ingestion services (file uploads, Telegram ingest) validate input, stage files, and publish Kafka events.
-- Storage Persistor moves objects to durable buckets and writes metadata to PostgREST.
-- Processing services (e.g., `pdfProcessor`) enrich assets and post downstream events.
-- Client tooling (CLI, internal apps) consumes APIs for search, download, moderation.
+## Quality & Operations
+- **Testing**: Require unit + integration coverage per layer. Kafka, PostgREST, and MinIO integrations must have smoke tests before cross-domain promotion. Capture anonymized fixtures under the owning directory.
+- **Resilience**: Operate Kafka in KRaft mode with replication factor 3. Enable MinIO versioning and scheduled PostgreSQL snapshots. Validate Vault token rotation and Consul snapshot automation quarterly.
+- **Deployability**: Each service exports `make build`, `make test`, `make deploy`. CI pipelines verify linting (`npx markdownlint-cli2` for docs, language-specific tooling for code), run tests, and sign container images.
+- **Observability**: Emit OTLP logs/metrics/traces with consistent attribute naming (`service.name`, `deployment.env`). Dashboards and alert policies live under `03_telemetry/`.
+- **Documentation**: When implementing or changing a service, update its directory README, adjust architecture/design docs, and record open questions in `prime_directives_and_constiruations.txt` until answered.
 
-## Event Flow (Claim Check Pattern)
-1. **Ingest**: Client uploads via API Gateway → ingestion service; file placed in temporary MinIO location.
-2. **Claim Check**: Ingestion service publishes lightweight Kafka message referencing staged object and metadata.
-3. **Persist**: Storage Persistor consumes message, moves file to long-term bucket, writes metadata via PostgREST.
-4. **Signal**: Persistor emits `media_ingested` event; processing services react to perform extraction, transcoding, etc.
-5. **Serve**: Processed metadata and assets accessed through business APIs with Authentik-protected headers.
-
-Idempotent consumers, explicit acknowledgements, and dead-letter topics keep the pipeline resilient. Kafka retention policies plus Schema Registry compatibility rules guard against data loss and schema drift.
-
-## Cross-Cutting Concerns
-- **Service Segmentation**: Configuration Management, Authentication, and Media Business Logic each run in their own namespace/cluster with dedicated Consul + Vault instances; the configuration stack’s pair also serves CI/CD pipelines that rely on `config-cli` (`designs/config-management.md`).
-- **Messaging**: Kafka cluster with replication factor 3, ZooKeeper-free KRaft mode, MirrorMaker 2 for DR replication (`designs/kafka-messaging-bus.md`).
-- **Identity**: Authentik SSO with forward-auth service injecting trusted headers; service-to-service auth handled by Consul/Vault.
-- **Security**: mTLS across mesh, secrets stored in Vault/ExternalSecrets, audit logging across identity and content workflows.
-- **Governance**: ADRs capture architectural decisions (`designs/adr/*`). Roadmaps call out evolution points for each subsystem.
-
-## Data Consistency
-- Consumers designed to be idempotent; state transitions validated before mutating storage.
-- Exactly-once semantics approximated via Kafka idempotent producers and transactional writes where necessary.
-- Dead-letter queues isolate poison messages; runbooks cover triage and reprocessing.
-
-## Representative Use Cases
-- **Document Archive**: Ingest PDFs, extract text, index for search, expose via knowledge-base CMS.
-- **Telegram Capture**: Poll channel, download media, convert, catalog for moderation.
-- **Video Library**: Transcode to multiple renditions, generate thumbnails, store metadata with playback policies.
-- **Image Pipeline**: Process EXIF, generate responsive sizes, update content tags.
-
-## Development & Operations
-- Container-first workflow; local dev via Docker Compose with mock dependencies.
-- CI enforces lint/test/build; deployments orchestrated by Argo CD GitOps pipelines.
-- Externalized configuration via Consul KV, typically injected through `config-cli` (see `designs/config-cli.md`); secrets fetched at runtime.
-- Backups cover PostgreSQL snapshots, MinIO bucket versioning, Kafka topic exports, and Consul snapshots.
-
-This layered architecture keeps services loosely coupled, leverages durable messaging, and ensures observability/security are first-class across the platform.
+This design keeps services loosely coupled, enables incremental delivery across domains, and provides enough platform scaffolding to scale into multi-region deployments once requirements demand it.

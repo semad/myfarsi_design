@@ -1,87 +1,76 @@
 # Configuration Management System
 
-## Mission
-Provide a dedicated control plane namespace (`platform-config`) that owns configuration distribution for all platform services and CI/CD pipelines. This stack operates its own Consul and Vault clusters, exposes `config-cli` tooling for runtime bootstrap, and maintains versioned configuration artifacts governed through GitOps.
+## Purpose
+Operate the `platform-config` namespace as the source of truth for configuration, secrets, and bootstrap tooling that every MyFarsi service depends on. This stack owns Consul, Vault, and the `config-cli` workflow referenced throughout `ARCHITECTURE.md`, `SystemReqs.md`, and `90_cli_tools/config-cli.md`.
 
-## Components
-| Component | Responsibility |
-| --- | --- |
-| Consul Cluster | 3–5 server quorum (per environment) serving KV configuration, service discovery, and Connect CA for internal agents. |
-| Vault Cluster | Manages ACL tokens for Consul, issues per-service credentials, and stores sensitive configuration that must not reside in Consul KV. |
-| `config-cli` | Entry-point wrapper and CLI for retrieving Consul keys, registering services, and synchronising configuration files (see `designs/config-cli.md`). |
-| GitOps Repository | Stores versioned configuration exports (`name.vN.yaml`) alongside environment manifests; changes flow through review and automated validation. |
-| CI/CD Integrations | GitHub Actions runners and automation jobs that render/runtime-inject configuration via `config-cli` pointing to this namespace. |
+## Responsibilities
+- Deliver validated configuration to services and CI/CD pipelines via Consul KV and GitOps exports.
+- Issue scoped Consul ACL tokens and runtime secrets through Vault (see `01_conf_mgmt/adr/0001-secret-rotation.md`).
+- Ship the `config-cli` binary and container image so workloads can hydrate configuration before process start.
+- Provide disaster recovery, observability, and governance guardrails for configuration changes.
 
-## Deployment Model
-- Namespace/cluster: `platform-config`.
-- Consul servers run on dedicated nodes with persistent volumes; agents run as DaemonSet on shared worker pools for clients that need KV/service discovery.
-- Vault servers deploy with integrated storage (Raft) and unseal automation; agent sidecars distribute dynamic credentials to workloads.
-- `config-cli` container image published from `tools/ccm_consul`; pipelines and applications copy the binary during build.
-- GitOps (Argo CD) manages Consul/Vault Helm charts, config entries, root policies, and RBAC.
+## Component Map
+| Component | Description | Key Notes |
+| --- | --- | --- |
+| Consul Servers | 3 node (staging) or 5 node (production) cluster supplying KV, service discovery, Connect CA. | Runs on the Equinix Metal-backed Kubernetes worker pool defined in Layer 1 ADR `02_cicd_mgmt/adr/0001-hosting-platform.md`. |
+| Vault Cluster | Integrated storage (raft) deployment handling secrets, Consul token management, and third-party credential rotation. | Vault audit devices forward logs to Layer 3 observability sinks. |
+| config-cli | Go-based CLI that fetches configuration, registers services, renders templates, and executes wrapped commands. | Published from `90_cli_tools/config-cli.md`; pipelines pin semantic versions. |
+| GitOps Repository | `configs/<service>/<env>/service.vN.yaml` artifacts plus Consul config entries. | Managed by Argo CD; validation jobs run `config-cli consul export --validate`. |
+| Automation | CI pipelines, Argo Workflows, and cronjobs that perform exports, rotations, and drift detection. | Credentials obtained via Vault AppRole with short TTL tokens. |
 
-## Workflows
-1. **Configuration Authoring**
-   - Operator edits YAML/JSON in repo → PR triggers validation (`config-cli consul export --validate` or unit tests).
-   - After merge, GitOps sync job runs `config-cli consul export` to push changes into Consul KV.
-2. **Service Bootstrap**
-   - Application container entrypoint: `config-cli run <service> --environment <env> --service-port <port> -- <cmd>`.
-   - `config-cli` fetches keys from `<env>/<service>/`, merges env vars, registers service in Consul, executes process, and handles deregistration on shutdown.
-3. **CI/CD Usage**
-   - Runners download `config-cli` binary (or use container image).
-   - Pipelines run `config-cli consul get` / `config-cli render` to template environment files before builds or deployments.
-   - When pipelines deploy new config, they use `config-cli consul import/export` to sync versioned files.
-4. **Disaster Recovery**
-   - Nightly Consul snapshots + Vault raft snapshots stored in encrypted object storage.
-   - Recovery plan: restore Vault first, rotate Consul ACL tokens via Vault, restore Consul snapshot, validate `config-cli` cache eviction.
+## Environments
+- **Local**: Docker Compose with single Consul (`-dev`) and Vault dev server for experimentation. No persistence.
+- **Staging**: Consul 3 node quorum, Vault HA (3 nodes). Namespaces mirror production. Metrics shipped to staging observability stack.
+- **Production**: Consul 5 node quorum across AZs, Vault 5 node raft cluster, dedicated worker pool for control-plane workloads. Mesh gateways expose limited services to other domains.
 
-## Security Controls
-- Vault issues scoped Consul ACL tokens via dynamic secrets; tokens injected through Vault Agent or `config-cli` runtime.
-- Consul gossip TLS and ACL enforcement enabled; root tokens sealed in Vault.
-- NetworkPolicies isolate `platform-config` namespace; only approved ingress (CI/CD runners, admin jumpboxes) allowed.
-- Configuration cache files on workloads stored under `/etc/config-cli/` with restricted permissions.
-- Audit logs:
-  - Consul ACL/Config entry audits shipped to centralized logging.
-  - Vault audit devices stream request logs to SIEM.
-  - `config-cli` emits structured JSON logs (operations, counts, cache fallback).
+## Core Workflows
+### Authoring and Promotion
+1. Engineer edits configuration under `configs/<service>/<env>/`.
+2. PR triggers lint (`npx markdownlint-cli2` for docs) and `make config-validate` which calls `config-cli consul export --validate`.
+3. Merge triggers Argo CD to reconcile; job runs `config-cli consul export --scope <env>` pushing to Consul KV.
+4. Drift checker compares live KV to exported artifacts daily; discrepancies open issues.
+
+### Service Bootstrap
+1. Entry point wraps application with `config-cli run <service> --environment <env> --service-port <port> -- <command>`.
+2. `config-cli` retrieves Consul/Vault credentials via Vault Agent or AppRole, pulls KV data from `<env>/<service>/`, renders templates, registers health checks, and launches the process.
+3. On shutdown it deregisters the service and clears cache directories (`/var/lib/config-cli/<service>`).
+
+### CI/CD Usage
+1. Self-hosted runners mount `config-cli` binary (managed artifact).
+2. Pipelines run `config-cli render` to produce `.env` or YAML files for builds, and `config-cli consul import/export` during promotion.
+3. Deployment pipelines publish configuration checksums alongside container images so promotion jobs can verify parity.
+
+### Recovery
+1. Nightly Consul snapshots (`consul snapshot save`) and Vault raft snapshots stored in encrypted MinIO bucket (EU residency per `22_db_back/adr/0001-data-retention.md`).
+2. Recovery order: restore Vault -> rotate Consul management token via Vault -> restore Consul snapshot -> invalidate stale caches (trigger `config-cli cache purge` across services).
+
+## Security
+- All Consul traffic uses TLS with Verify Incoming/Outgoing enabled; gossip keys rotate quarterly.
+- Vault issues dynamic Consul tokens and third-party secrets with TTL <= 24 hours.
+- Kubernetes NetworkPolicies isolate control-plane pods; only approved namespaces (CI/CD, ops bastions) reach Consul/Vault APIs.
+- `config-cli` caches on disk with `0700` permissions; cache encryption is optional but recommended for production (feature flag pending).
+- Audit trails: Consul audit log, Vault audit devices, and `config-cli` structured logs feed into the observability stack.
 
 ## Observability
-- Consul and Vault exporters scraped by platform Prometheus (`designs/observability-platform.md`).
-- Dashboards track:
-  - Consul leader changes, RPC latency, KV request volume, ACL token issuance.
-  - Vault seal status, auth method usage, secret lease counts.
-  - `config-cli` run metrics (success/fail counts) via pipeline instrumentation.
-- Alerts: quorum loss, replicated state divergence, token issuance failures, config cache fallback rate > X%.
+- Prometheus scrapes Consul and Vault exporters; key dashboards track quorum health, ACL issuance, secret lease churn, and config-cli run outcomes.
+- Alerts: quorum loss, raft apply latency, snapshot failures, token issuance errors, cache fallback rates over agreed thresholds.
+- Traceability: `config-cli` emits OTLP traces around Consul/Vault calls for correlation with dependent service spans.
 
-## GitOps & Governance
-- Configuration repo structure:
-  ```
-  configs/
-    <service>/
-      production/
-        service.v5.yaml
-      staging/
-        service.v3.yaml
-  ```
-- Promotion workflow: export staging version to new prod file (`vN+1`), review, merge, `config-cli consul export` pushes to Consul.
-- ADRs capture significant policy or layout changes (see `designs/adr/*`).
-- Access: operators require short-lived Vault tokens; CI users rely on OIDC Federation to assume roles that permit `consul:v1` API calls.
-
-## Integration Points
-- **Authentication System**: consumes configuration via `config-cli` and registers forward-auth/Authentik components with the authentication namespace’s Consul cluster.
-- **Media Business Logic**: obtains runtime configuration through Consul (`config-cli`) but manages its own Consul/Vault for internal services.
-- **External Tooling**: home-edge and bootstrap projects mount `config-cli` to fetch configuration even in constrained networks.
+## Governance
+- Every change to configuration hierarchy must link to a ticket or ADR. Breaking changes require preview environments or feature flags.
+- ADRs for configuration policy live under `01_conf_mgmt/adr/`. Update System Requirements when decisions materially change scope.
+- Access managed through Vault roles. Human operators use short-lived tokens obtained via SSO; automation relies on AppRole with CIDR and TTL limits.
 
 ## Roadmap
-1. Implement Consul namespaces/partitions for finer isolation across product lines.
-2. Add automated drift detection comparing GitOps exports with live Consul KV.
-3. Publish Prometheus metrics from `config-cli` runs to track cache fallbacks, runtime, and exit codes.
-4. Introduce policy-as-code (OPA) to validate configuration keys before acceptance.
-5. Evaluate integrating Vault secrets rendering into `config-cli` via pluggable providers once scoped needs arise.
+1. Introduce Consul namespaces and partitions for service segmentation across business units.
+2. Integrate policy-as-code (OPA) to validate configuration keys before acceptance.
+3. Publish config-cli metrics to Prometheus via native exporter for richer SLO tracking.
+4. Automate GitOps drift detection with pull request suggestions.
+5. Extend config-cli to render Vault secrets alongside Consul data with provider plugins.
 
 ## References
-- Architecture context: `designs/ARCHITECTURE.md`
-- Tooling: `designs/config-cli.md`
-- Consul platform details: `designs/consul.md`
-- Vault operations: internal runbooks under `0_mediaInfra/`
-- CI/CD runner usage: `designs/cicd-runner.md`
-- GitOps process: `designs/gitops-repository.md`
+- `ARCHITECTURE.md` and `DESIGN.md` for platform context.
+- `SystemReqs.md` for layer requirements and recent decisions.
+- `90_cli_tools/config-cli.md` for tooling usage.
+- `01_conf_mgmt/consul.md` and `01_conf_mgmt/mesh-gateway.md` for platform specifics.
+- `02_cicd_mgmt/cicd-runner.md` and `02_cicd_mgmt/gitops-repository.md` for CI/CD integration.

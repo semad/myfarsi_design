@@ -1,74 +1,65 @@
 # Media Business Logic Platform
 
-## Mission
-Deliver ingestion, cataloging, enrichment, and retrieval of media assets while remaining autonomous from the configuration and authentication stacks. The `media-core` namespace/cluster owns its Consul + Vault pair, Kafka bus, and storage services, exposing APIs and events consumed by clients and downstream systems.
+## Purpose
+Coordinate ingestion, persistence, enrichment, and delivery workflows for media assets within the `media-core` domain. This document aligns the media platform with the updated architecture (`ARCHITECTURE.md`), requirements (`SystemReqs.md`), and supporting specs (Kafka, MinIO, PostgREST, Logic Router, Search).
 
-## Core Services
-| Service | Responsibility | Design Docs |
+## Domain Overview
+| Layer | Services | References |
 | --- | --- | --- |
-| Ingestion Services (`file-upload-api`, `telegram-ingestor`, …) | Accept media from clients, stage artifacts in MinIO, and publish metadata pointers to Kafka. | `designs/content-management.md`, `designs/kafka-messaging-bus.md` |
-| StoragePersistor | Consumes raw ingest events, moves objects into long-term buckets, persists metadata via PostgREST, and emits `media_ingested` events. | `designs/minio-content-server.md`, `designs/postgres-api-platform.md` |
-| Processing Services (`pdfProcessor`, OCR, enrichment jobs) | React to ingested events to extract text, enrich metadata, and update PostgREST. | `designs/content-management.md`, `designs/search-elasticsearch.md` |
-| Public APIs (Logic Router, PostgREST, search endpoints) | Provide consistent interfaces (REST/GraphQL) for clients to query catalogs and retrieve assets. | `designs/logic-router.md`, `designs/postgres-api-platform.md`, `designs/search-elasticsearch.md` |
-| Observability Agents | Emit telemetry (metrics/logs/traces) into shared observability stack. | `designs/observability-platform.md`, `designs/tracing-platform.md` |
+| Ingestion | `file-upload-api`, `telegram-ingestor`, future connectors | `20_central_bus/kafka-messaging-bus.md`, `21_content_manager/minio-content-server.md` |
+| Persistence | `storage-persistor`, metadata migrations | `22_db_back/postgres-api-platform.md` |
+| Processing | `pdf-processor`, thumbnailer, OCR, ML enrichment | `40_ai/ai-services.md` (to be created as models mature) |
+| Delivery | Logic Router, Search API, PostgREST endpoints | `51_Presentation_back/logic-router.md`, `23_search_back/search-elasticsearch.md` |
+| Observability | Metrics/logs/traces, runbooks | `03_telemetry/observability-platform.md`, `docs/content/minio-runbook.md` |
 
-Supporting infrastructure includes Kafka (KRaft) with Schema Registry, MinIO cluster with control service, PostgreSQL + PostgREST, Elasticsearch search stack, and Redis for queues/caches.
+The domain operates its own Consul + Vault pair, Kafka cluster, MinIO storage, and Elasticsearch stack. Cross-domain access occurs via mesh gateways (`01_conf_mgmt/mesh-gateway.md`).
 
-## Namespace Architecture
-- Consul and Vault dedicated to `media-core`; services register locally and receive mesh identities via Consul Connect.
-- Vault issues service credentials (PostgreSQL, MinIO, Kafka) with short TTL leases; secrets stored in ExternalSecrets for workloads requiring file mounts.
-- Kafka brokers, Schema Registry, and MinIO reside within the namespace, exposing load-balanced endpoints to external consumers through mesh gateways or API Gateway as needed.
-- Argo CD manages Helm releases for each subsystem; GitOps repo stores values overlays and configuration exports.
-
-## Data Flow
+## Workflows
 1. **Ingestion**
-   - API Gateway forwards client uploads to ingestion endpoints.
-   - Ingestion service stages file in MinIO (temporary bucket) and publishes a `media.raw-ingest.v1` event to Kafka.
+   - Clients authenticate via API Gateway (forward-auth).
+   - Ingestion service stages file in MinIO `media-staging` bucket and emits `media.raw_ingest.v1`.
+   - Metadata such as tenant, locale, checksum packaged in the event.
 2. **Persistence**
-   - StoragePersistor consumes the event, moves the object into a versioned bucket, writes metadata (PostgREST), and emits `media.ingested.v1`.
+   - Storage Persistor listens to `media.raw_ingest.v1`, moves object to durable bucket, writes metadata via PostgREST, and emits `media.ingested.v1`.
+   - Dead-letter topic captures failures for manual replay.
 3. **Processing**
-   - Processing services subscribe to `media.ingested.v1`, perform transformations (text extraction, thumbnail generation), update PostgREST, and optionally publish new events (`media.processed.v1`).
+   - Workers subscribe to `media.ingested.v1`, perform extraction/ML tasks, update metadata (`content.asset_metadata` table), store derived objects (thumbnails) in MinIO, and emit follow-up events (e.g., `media.asset_enriched.v1`).
 4. **Delivery**
-   - Logic Router/PostgREST serve metadata, while signed URLs from MinIO deliver binary assets.
-   - Search API queries Elasticsearch indices populated by indexer workers.
-
-Kafka topics follow `<domain>.<event>.<version>` naming with schema compatibility enforced via Schema Registry. Dead-letter topics capture failed events for manual triage.
+   - Logic Router aggregates metadata (PostgREST) and signed URLs (MinIO control) to serve client requests.
+   - Search API indexes documents using events and PostgREST snapshots.
+   - Presentation front-ends consume Logic Router and Search APIs (`52_Presentation_front/frontend-app.md`).
 
 ## Configuration & Secrets
-- Runtime configuration stored in local Consul KV (`media-core/<service>/…`); services bootstrap using `config-cli` but pointing at the media Consul cluster.
-- Authentication stack endpoints (forward-auth, OIDC) consumed via external HTTP; credentials stored in Vault or ExternalSecrets.
-- Shared/lower environments may consume base configuration from `platform-config` Consul while overriding service-specific keys locally.
+- Services bootstrap via `config-cli` pointing to the `media-core` Consul cluster (`media-core/<service>/config` paths).
+- Vault issues credentials for PostgreSQL, MinIO, Kafka; AppRole policies scoped per service.
+- Feature flags (e.g., enabling new processors) stored in Consul; toggled via GitOps.
 
-## Observability & Operations
-- Metrics scraped by namespace-level Prometheus; dashboards include ingestion throughput, Kafka lag, MinIO capacity, PostgREST latency, search zero-result rate.
-- Loki collects structured logs (JSON) with correlation IDs; traces propagated via OpenTelemetry middleware.
-- Runbooks cover Kafka maintenance, MinIO lifecycle policies, Postgres backups (PITR), Elasticsearch snapshots, and Logic Router canary releases.
-- Incident response: on schema breaks or Kafka backlog, pause producers via feature flags in Consul; restart consumers after remediation.
+## Observability & Runbooks
+- Metrics instrumented with OTLP exports. Key KPIs: ingestion latency, Kafka lag, MinIO promotion time, processing success rate.
+- Runbooks available under `docs/`:
+  - `docs/content/minio-runbook.md` (storage)
+  - `docs/events/event-catalog.md` (event references)
+  - `docs/media/kafka-runbook.md` (messaging)
+  - `docs/media/processing-runbook.md` (processing)
+- Alerts tie to SLOs defined in `SystemReqs.md`: ingestion throughput, processing backlog, delivery latency.
 
-## Security
-- API Gateway + forward-auth enforce user identity; service-to-service communication uses Consul Connect mTLS.
-- Asset delivery uses signed URLs with short-lived tokens; MinIO buckets enforce versioning and lifecycle rules.
-- Kafka ACLs managed via GitOps; services hold producer/consumer credentials issued by Vault.
-- PostgREST row-level security ensures user-scoped data access; Logic Router performs additional RBAC header checks.
-
-## Deployment Pipeline
-- Code repositories build via GitHub Actions runners (configuration from `platform-config`).
-- Container images published to private registry (`designs/docker-registry.md`).
-- GitOps PR updates Helm values (image tags, config) under `apps/media/*`; Argo CD synchronizes staging → production after approvals.
-- Integration tests run against ephemeral environments using namespace overlays.
+## Deployment
+- GitHub Actions build container images; artifacts pushed to private registry.
+- GitOps repository contains Helm values under `apps/media/<service>`.
+- Argo CD syncs staging before production; manual approval required for schema changes or breaking events.
+- Feature rollout strategy: toggle in Consul, canary release via Logic Router route targeting.
 
 ## Roadmap
-1. Introduce data residency controls (bucket replication policies, regional Kafka mirrors).
-2. Add background job orchestration (e.g., Temporal) for complex workflows.
-3. Extend processing services with ML enrichment and content moderation.
-4. Implement user-facing GraphQL gateway for media search/browse experiences.
-5. Automate drift detection between PostgREST schema and ingestion processors.
+1. Implement additional ingestion connectors (email, RSS) with shared libraries.
+2. Add ML enrichment pipeline (transcription, moderation) with GPU-capable workers.
+3. Introduce Temporal or Workflow engine for long-running processing sequences.
+4. Define multi-region replication policies for MinIO and PostgreSQL (per System Requirements).
+5. Automate event contract testing in CI using schemas from `docs/events/event-catalog.md`.
 
 ## References
-- Messaging & events: `designs/kafka-messaging-bus.md`
-- Ingestion & CMS: `designs/content-management.md`
-- Object storage: `designs/minio-content-server.md`
-- Catalog API: `designs/postgres-api-platform.md`
-- Search platform: `designs/search-elasticsearch.md`
-- Logic Router: `designs/logic-router.md`
-- Observability/Tracing: `designs/observability-platform.md`, `designs/tracing-platform.md`
+- `20_central_bus/kafka-messaging-bus.md`
+- `21_content_manager/minio-content-server.md`
+- `22_db_back/postgres-api-platform.md`
+- `23_search_back/search-elasticsearch.md`
+- `51_Presentation_back/logic-router.md`
+- `SystemReqs.md`

@@ -30,7 +30,7 @@
    - Apply `env-<env>` (dev/staging/prod) based on pipeline context.
    - Tag with short SHA (`AUTO_GIT_TAG=true`).
 4. **Push**
-- Push all tags to private registry (`designs/docker-registry.md`).
+- Push all tags to private registry (`02_cicd_mgmt/docker-registry.md`).
    - Capture pushed digests for release notes and GitOps updates.
 5. **GitOps Update**
    - Update environment overlays (`apps/<service>/overlays/<env>/values.yaml`) with the immutable SHA tag or explicit `vX.Y.Z`.
@@ -66,9 +66,9 @@
 - **Media Business Logic**: All ingestion/process services share the tagging pipeline; Kafka consumers and producers roll out based on immutable SHA, while `env-<env>` marks current channel.
 
 ## Integration Points
-- CI/CD design (`designs/cicd-runner.md`): extends runner workflows with tagging steps (`registry-build-push` target, `AUTO_GIT_TAG=true`).
-- GitOps design (`designs/gitops-repository.md`): environment overlays use explicit tags; promotion PRs documented with tag transitions.
-- Registry design (`designs/docker-registry.md`): supports multiple tags per manifest; retention and GC configured to keep historical digests.
+- CI/CD design (`02_cicd_mgmt/cicd-runner.md`): extends runner workflows with tagging steps (`registry-build-push` target, `AUTO_GIT_TAG=true`).
+- GitOps design (`02_cicd_mgmt/gitops-repository.md`): environment overlays use explicit tags; promotion PRs documented with tag transitions.
+- Registry design (`02_cicd_mgmt/docker-registry.md`): supports multiple tags per manifest; retention and GC configured to keep historical digests.
 - Media/Authentication/Config designs reference this strategy to ensure uniform deployment semantics.
 
 ## Roadmap

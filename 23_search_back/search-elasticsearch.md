@@ -1,22 +1,19 @@
 # Search Platform (Elasticsearch)
 
 ## Purpose
-Provide fast, relevance-ranked search across content authored in the CMS and assets stored in MinIO. Search results honor localization and Authentik-based permissions while exposing REST (and future GraphQL) APIs behind the Logic Router.
+Provide fast, relevance-ranked search over CMS content and media metadata while honoring localization, access control, and retention requirements. Elasticsearch augments the data plane defined in `ARCHITECTURE.md` and `DESIGN.md`, consuming events from Kafka (`20_central_bus/kafka-messaging-bus.md`) and metadata from PostgreSQL/PostgREST (`22_db_back/postgres-api-platform.md`).
 
-## Architecture
-```
-CMS / PostgreSQL ─┐
-                  ├─► Indexer Workers ─► Elasticsearch Cluster ─► Search API ─► Consul API Gateway ─► Clients
-MinIO (assets) ───┘
-```
-- Indexer reacts to CMS publish/unpublish events (Kafka topic or polling) to sync documents.
-- Apache Tika (or similar) extracts text from attachments; cached to avoid reprocessing.
-- Search API (Go) wraps Elasticsearch queries, enforces RBAC, localization fallback, facets, and suggestions.
-- Kibana/OpenSearch Dashboards optional for operators.
+## Platform Overview
+| Component | Responsibility | Notes |
+| --- | --- | --- |
+| Elasticsearch Cluster | Stores indexed documents and serves queries | Three-node cluster per environment (Elastic Cloud or self-managed operator) with TLS and security features enabled. |
+| Indexer Workers | React to CMS and MinIO events to build/update documents | Reads from Kafka topics (`media.asset_uploaded.v1`, `cms.article_published.v1`) and PostgREST endpoints. |
+| Search API | Go service wrapping Elasticsearch queries, enforcing Authentik RBAC, locale fallback, and caching | Exposed via Consul API Gateway; aligns with presentation REST contracts (`51_Presentation_back/adr/0001-api-contract.md`). |
+| Optional Dashboards | Kibana or OpenSearch Dashboards for operators | Restricted behind Authentik + Cloudflare Access. |
 
 ## Index Design
-- Index name pattern: `kb-content-<env>-v1`; alias `kb-content-<env>-current`.
-- Document fields:
+- **Indexes**: `content-<env>-v1`, `assets-<env>-v1`; aliases `content-<env>-current`, etc. Versioned indices allow zero-downtime reindex.
+- **Document Schema**:
   ```json
   {
     "id": "article-uuid#locale",
@@ -28,70 +25,82 @@ MinIO (assets) ───┘
     "tags": ["auth", "sso"],
     "category": "string",
     "published_at": "datetime",
-    "attachments": [
-      {"object_key": "cms/foo.pdf", "content_type": "application/pdf", "text": "extracted text"}
-    ],
     "roles": ["cms-readers", "cms-admins"],
     "spaces": ["knowledge-base"],
+    "attachments": [
+      {
+        "object_key": "cms/foo.pdf",
+        "content_type": "application/pdf",
+        "text": "extracted text"
+      }
+    ],
     "boost": 1.0
   }
   ```
-- Nested mapping for attachments; analyzers tuned per locale (Persian, English).
-- Localization: one document per locale. Query fallback implemented in API (preferred locale → default).
-- Reindexing via versioned indices; use `_reindex` to migrate, then switch alias.
+- One document per locale; API handles fallback (preferred locale -> default). Attachments stored as nested objects; text extracted via Apache Tika or similar.
+- Analyzers tuned per language (Persian, English). Use synonyms and stopwords where appropriate.
+- Document expiration driven by CMS events; no PII stored beyond what presentation APIs expose.
 
 ## Indexer Workflow
-1. Receive event (`article_published`, `article_updated`, `article_unpublished`).
-2. Fetch latest article version + metadata from PostgreSQL.
-3. Pull attachments from MinIO using signed URL; extract text.
-4. Build document(s) per locale; send `_bulk` request to Elasticsearch.
-5. On unpublish, delete document or set flag to exclude from results.
-
-Bulk rebuild command reads from CMS database and repopulates index; used for DR or schema changes.
+1. Consume publish/update/unpublish events from Kafka.
+2. Fetch latest metadata from PostgREST (with service role `api_service_indexer`).
+3. Pull attachments from MinIO using signed URLs (limited TTL).
+4. Extract text, build locale-specific documents, send `_bulk` requests.
+5. On unpublish or takedown, delete documents or flag them as hidden.
+6. Bulk rebuild command replays from CMS/PostgreSQL for DR or schema changes.
 
 ## Search API
 - Endpoints:
   - `GET /search?q=...&locale=fa-IR&filters[tags]=sso&size=20`
+  - `POST /search` for advanced queries (facets, search_after).
   - `GET /suggest?q=auth`
-  - `POST /search` for advanced queries.
-- Features: BM25 scoring, highlight snippets, facets (tags, category, locale), autocomplete (completion suggester), pagination with `from/size` or search_after.
-- Authorization: API inspects Authentik groups from forward-auth headers; applies `terms` filter on `roles`. Future enhancement: leverage Elasticsearch document-level security if licensing permits.
-- Caching: optional Redis-backed short-term cache keyed by query + groups.
-- Observability: metrics for query latency, hit count, zero-result rate; logs include hashed user ID, query, filters (PII-safe).
+- Features:
+  - BM25 scoring with optional boosting (`boost` field).
+  - Highlight snippets, faceted navigation (tags, category, locale).
+  - Autocomplete via completion suggester.
+  - Pagination with `from/size` or cursor (`search_after`).
+- Authorization:
+  - API inspects Authentik headers (`x-auth-groups`, JWT) and applies `terms` filter on `roles`.
+  - For paid tiers, evaluate Elasticsearch document-level security (requires appropriate licensing).
+- Caching: Optional Redis cache keyed by query + groups; TTL tuned to seconds/minutes.
 
 ## Deployment
-| Environment | Elasticsearch | Notes |
+| Environment | Cluster | Notes |
 | --- | --- | --- |
-| Local | Single-node via `docker-compose.search.yml` | Include Kibana optional; simplified auth. |
-| Staging | 3-node cluster (Elastic Cloud or self-managed Operator) | TLS and security features enabled. |
-| Production | 3+ data nodes, dedicated masters if self-managed; snapshots enabled | Sizing depends on content volume & query load. |
+| Local | Single-node Docker Compose | Simplified auth; developer-focused. |
+| Staging | Three-node Elasticsearch with security enabled | TLS, built-in users disabled; credentials via Vault. |
+| Production | Three data nodes + dedicated masters if needed | Snapshots to MinIO/S3; autoscaling sized for query volume. |
 
-Search API & Indexer run in `search` namespace; GitOps overlays manage per-env configuration. Consul API Gateway routes `/search/*` to API; Kibana behind Cloudflare Access.
+Search API and indexers run in the `search` namespace. Consul API Gateway routes `/search/*`; mesh gateways handle cross-domain access per `01_conf_mgmt/mesh-gateway.md`.
 
-## Security
-- TLS-in-transit; certificates from cert-manager/Vault. API authenticates using Elasticsearch API key with scoped privileges.
-- Control plane (Kibana) gated by Authentik + Cloudflare Access.
-- Signed URLs for attachment ingestion expire quickly; only indexer service account can access extraction bucket.
-- Audit logs for indexing actions and search queries retained in Loki/SIEM.
+## Security & Compliance
+- TLS for cluster transport and HTTP. Certificates issued via cert-manager or Vault PKI.
+- Authentication for indexer/API via Elasticsearch API keys scoped to specific index operations. Keys stored in Vault and rotated quarterly.
+- Kibana access restricted via Authentik + Cloudflare Access.
+- Attachment extraction uses signed URLs that expire within minutes. No permanent external credentials stored in indexers.
+- Audit logs capture indexing actions and search queries; forward to Loki/SIEM for 180-day retention.
+- Retention of search indexes aligns with data residency (EU). Snapshots stored in EU regions.
 
 ## Observability
-- Metrics: Elasticsearch cluster health, heap usage, query latency; indexer throughput/error counters; API latency/error rate.
-- Dashboards: search traffic, zero-result rate, top queries, indexer backlog.
-- Alerts: cluster status `red`, CPU/heap >80%, zero-result spike, indexer retries > threshold.
+- Metrics: cluster health (`elasticsearch_cluster_health_status`), heap usage, search latency, indexer throughput (`indexer_events_processed_total`), error counts.
+- Dashboards: query volume, zero-result rate, top queries, indexer backlog, cluster resource usage.
+- Alerts: cluster status red/yellow, heap or CPU > 80%, zero-result spike, indexer retries > threshold, snapshot failures.
+- Tracing: Search API emits OTLP spans, including slow query annotations; correlate with presentation service traces.
 
 ## Backup & DR
-- Daily snapshots to S3-compatible storage; retention 14–30 d.
-- DR procedure: deploy new cluster, restore snapshot, repoint alias; optionally replay from CMS to ensure freshness.
-- Indexer can rebuild entire index from CMS metadata if snapshots unavailable.
+- Daily snapshots to MinIO/S3 with 14-30 day retention. Automated verification ensures latest snapshot is restorable.
+- DR procedure: restore snapshot to new cluster, update aliases, replay recent events if needed.
+- Bulk rebuild command documented to reindex from CMS/PostgreSQL when snapshot unavailable.
 
 ## Roadmap
-1. Phase 1: MVP index (articles only), REST API, group-based filtering, basic dashboards.
-2. Phase 2: Attachment extraction, autocomplete, facets, Kibana dashboards.
-3. Phase 3: GraphQL endpoint, personalization signals (boost by user history), CDC-driven near real-time updates.
-4. Phase 4: Cross-lingual search, learning-to-rank, external search portal (if productized).
+1. **Phase 1**: Deliver core search index and REST API with group-based filtering, dashboards, and snapshot automation.
+2. **Phase 2**: Add attachment extraction, autocomplete, facets, and Kibana dashboards.
+3. **Phase 3**: Introduce GraphQL endpoint, personalization signals (boosting by user history), and near real-time CDC triggers.
+4. **Phase 4**: Explore cross-lingual search, learning-to-rank, and external-facing search portal if productized.
 
 ## References
-- Content platform (`designs/content-management.md`)
-- MinIO content server (`designs/minio-content-server.md`)
-- Identity (`designs/authentication.md`)
-- Observability (`designs/observability-platform.md`)
+- `ARCHITECTURE.md`, `DESIGN.md`, `SystemReqs.md`.
+- `20_central_bus/kafka-messaging-bus.md` for event contracts feeding the indexer.
+- `21_content_manager/minio-content-server.md` for asset storage workflows.
+- `22_db_back/postgres-api-platform.md` for metadata sourcing.
+- `03_telemetry/observability-platform.md` for monitoring integration.

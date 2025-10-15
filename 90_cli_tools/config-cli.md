@@ -72,7 +72,7 @@ Key packages:
 - Run inside containers with least privilege; avoid sharing tokens beyond the config-cli process.
 
 ## Integration Points
-- **Consul Platform**: aligns with the service discovery strategy in `designs/consul.md`; all services bootstrapped through config-cli appear automatically in the mesh.
+- **Consul Platform**: aligns with the service discovery strategy in `01_conf_mgmt/consul.md`; all services bootstrapped through config-cli appear automatically in the mesh.
 - **CI/CD Pipelines**: runner pools and build jobs target the configuration management namespace’s Consul/Vault instances as their canonical source of configuration, using `config-cli` to render or inject runtime values during builds and deployments.
 - **Application Containers**: Dockerfiles use multi-stage copy of `config-cli` as entrypoint; GitOps manifests set environment flags and health checks.
 - **Home Edge / Bootstrap stacks**: leveraged to keep services configured even when Consul is intermittently unavailable thanks to the cache fallback.
@@ -86,7 +86,7 @@ Key packages:
 5. Evaluate Consul Connect registration (upstream/downstream intentions) in addition to basic service catalog entries.
 
 ## References
-- System overview: `designs/config-management.md`
+- System overview: `01_conf_mgmt/config-management.md`
 - Implementation: `tools/ccm_consul/internal/`
 - Specs: `tools/ccm_consul/specs/004-consul-only-lets/`
-- Runbook guidance for Consul platform: `designs/consul.md`
+- Runbook guidance for Consul platform: `01_conf_mgmt/consul.md`

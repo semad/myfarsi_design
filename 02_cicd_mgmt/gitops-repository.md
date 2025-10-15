@@ -73,6 +73,6 @@ infra-gitops/
 4. ChatOps commands for promoting or syncing via Argo CD API with RBAC controls.
 
 ## References
-- CI/CD runner design (`designs/cicd-runner.md`)
-- Observability platform (`designs/observability-platform.md`)
+- CI/CD runner design (`02_cicd_mgmt/cicd-runner.md`)
+- Observability platform (`03_telemetry/observability-platform.md`)
 - Service-specific designs referenced within overlays.
