@@ -1,4 +1,4 @@
-# Makefile for myfarsi_design
+# Makefile for myfarsi_design documentation
 
 # Default target
 .DEFAULT_GOAL := help
