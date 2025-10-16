@@ -8,6 +8,7 @@ build/
 
 # OS files
 .DS_Store
+*/.DS_Store
 Thumbs.db
 
 # Editor settings
@@ -34,3 +35,16 @@ tmp/
 *.test
 vendor/
 *.out
+
+
+# AI setting
+specs/*
+.specify/*
+.codex/*
+.gemini/*
+GEMINI.md
+AGENTS.md
+
+# Html
+*.html
+*.htm

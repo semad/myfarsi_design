@@ -1,9 +1,11 @@
 # Authentik Identity Platform
 
 ## Purpose & Mandate
+
 Consolidate how MyFarsi authenticates human users and API clients via Authentik so infra, security, and product teams implement a consistent SSO posture. This rewrite replaces prior hybrid-identity notes, forward-auth specs, and platform runbooks with a single source of truth.
 
 ## Scope
+
 - Offer resilient login experiences (native + social) for browser and programmatic clients.
 - Enforce authentication at the Consul API Gateway edge through an external authorization service.
 - Keep boundaries clear between user identity (Authentik), service identity (Vault/Consul Connect), and fine-grained authorization engines (OPA, app-level RBAC).
@@ -13,7 +15,8 @@ Consolidate how MyFarsi authenticates human users and API clients via Authentik 
 Out of scope: mTLS between services, device-posture enforcement, Vault-managed secrets for Authentik (still delivered via ExternalSecrets).
 
 ## Platform Topology
-```
+
+```text
 User / API Client
    │
    ▼
@@ -26,21 +29,24 @@ Forward-Auth Service ──► Redis (sessions)
        │                   └► Redis (queue/session)
        └─► JWKS cache / telemetry exporters
 ```
+
 - Gateway delegates authentication decisions to the forward-auth service.
 - Forward-auth exchanges OIDC tokens with Authentik, maintains a short-lived session cache, and returns trusted headers to Envoy.
 - Downstream apps consume headers rather than integrating Authentik directly.
 
 ## Component Responsibilities
-| Component | Summary |
-| --- | --- |
-| Authentik Core | Django-based identity provider hosting providers, policies, admin UI, and async workers. |
-| Forward-Auth | Implements Envoy `ext_authz`; handles redirects, token validation, session storage, and header injection. |
-| Consul API Gateway | Edge ingress enforcing external auth before routing to internal services. |
-| Persistence | Managed PostgreSQL for configuration/state; Redis clusters for Authentik queue + session cache and forward-auth cache. |
-| Secrets | ExternalSecrets/Kubernetes Secrets storing OAuth credentials, signing keys, SMTP, webhook secrets. |
-| Observability | Prometheus, Loki, Tempo fed via OpenTelemetry exporters from Authentik and forward-auth. |
+
+| Component          | Summary                                                                                                                |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| Authentik Core     | Django-based identity provider hosting providers, policies, admin UI, and async workers.                               |
+| Forward-Auth       | Implements Envoy `ext_authz`; handles redirects, token validation, session storage, and header injection.              |
+| Consul API Gateway | Edge ingress enforcing external auth before routing to internal services.                                              |
+| Persistence        | Managed PostgreSQL for configuration/state; Redis clusters for Authentik queue + session cache and forward-auth cache. |
+| Secrets            | ExternalSecrets/Kubernetes Secrets storing OAuth credentials, signing keys, SMTP, webhook secrets.                     |
+| Observability      | Prometheus, Loki, Tempo fed via OpenTelemetry exporters from Authentik and forward-auth.                               |
 
 ## Deployment Model
+
 - Namespace: `auth`.
 - Delivery: official Authentik Helm chart templated with `config-cli render authentik` (see `90_cli_tools/config-cli.md` for templating workflow).
 - Pods:
@@ -61,21 +67,24 @@ Forward-Auth Service ──► Redis (sessions)
   - Weekly `ak backup` export stored encrypted in version control.
 
 ## Identity Providers & Account Strategy
-| Provider | Audience | Notes |
-| --- | --- | --- |
-| Authentik Native | Platform admins, internal staff, limited beta users. Enforce Web/MFA policies per group. |
-| Google OIDC | External or Workspace users; optionally restrict to specific domains. |
-| Facebook OAuth | Consumer cohorts; ensure App Review coverage and privacy notices. |
-| GitHub OAuth | Engineering and partner developers; map org/team to Authentik groups. |
-| Future Enterprise IdP | Reserved for hybrid identity rollout (SAML/OIDC). |
+
+| Provider              | Audience                                                                                 | Notes |
+| --------------------- | ---------------------------------------------------------------------------------------- | ----- |
+| Authentik Native      | Platform admins, internal staff, limited beta users. Enforce Web/MFA policies per group. |       |
+| Google OIDC           | External or Workspace users; optionally restrict to specific domains.                    |       |
+| Facebook OAuth        | Consumer cohorts; ensure App Review coverage and privacy notices.                        |       |
+| GitHub OAuth          | Engineering and partner developers; map org/team to Authentik groups.                    |       |
+| Future Enterprise IdP | Reserved for hybrid identity rollout (SAML/OIDC).                                        |       |
 
 Account personas:
+
 - **Administrators**: Manage platform; strong MFA, short tokens.
 - **Employees**: Access internal tools; group-based RBAC `employees`, `cms-editor`, etc.
 - **Consumers**: Access front-end features; coarse-grained groups.
 - **Service Accounts**: Machine clients with JWT credentials used by PostgREST, Grafana, etc.
 
 ## Access Policies & Session Flow
+
 1. Gateway receives request and forwards to forward-auth `ext_authz`.
 2. Forward-auth validates session cookie or bearer token; if absent/invalid it crafts an Authentik redirect.
 3. Authentik completes OIDC flow, issues tokens, and sets session cookie scoped to forward-auth domain.
@@ -85,6 +94,7 @@ Account personas:
 Headers and cookies follow the `auth.<env>.myfarsi.dev` domain standard; TTLs align with OAuth client defaults (60 m access, 7 d refresh) unless the app requires shorter windows.
 
 ## Security & Compliance
+
 - Mandate TLS (mTLS inside mesh) for all hops.
 - Rotate signing keys and session secrets quarterly; store metadata in secret manager with rotation runbook.
 - Enforce rate limiting and CAPTCHA on public login forms via Authentik policies.
@@ -93,6 +103,7 @@ Headers and cookies follow the `auth.<env>.myfarsi.dev` domain standard; TTLs al
 - Document emergency procedures for revoking compromised tokens and disabling external IdPs.
 
 ## Observability
+
 - **Metrics**: login success/failure counts, token issuance latency, worker queue depth, forward-auth decision counts/latency, Redis cache miss rate.
 - **Logs**: structured JSON with correlation IDs (`x-request-id`). Forward-auth logs include policy outcomes and redirect reasons.
 - **Traces**: instrument Authentik (Django) and forward-auth via OpenTelemetry; propagate W3C trace context headers through the gateway.
@@ -103,6 +114,7 @@ Headers and cookies follow the `auth.<env>.myfarsi.dev` domain standard; TTLs al
   - Signing key expiry < 14 d (rotate).
 
 ## Operations Runbook
+
 - **Deploy/Upgrade**: `make deploy-authentik ENV=<env>` triggers Helm upgrade; forward-auth uses kustomize overlay with canary capability via Consul subsets.
 - **Probes**: `/healthz` endpoint on forward-auth used for Kubernetes and gateway checks; failing health triggers circuit break at the edge.
 - **User Lifecycle**: native accounts managed via Authentik admin or API; social-to-native linking documented to prevent duplicate identities.
@@ -117,18 +129,21 @@ Headers and cookies follow the `auth.<env>.myfarsi.dev` domain standard; TTLs al
   - Notify stakeholders and confirm dashboards recover to baseline.
 
 ## Backup & Disaster Recovery
+
 1. Restore PostgreSQL from latest PITR snapshot.
 2. Rehydrate Authentik via Helm with restored database; rotate secrets if compromise suspected.
 3. Re-deploy forward-auth and purge stale Redis sessions.
 4. Validate login → token issuance → header propagation before re-opening traffic.
 
 ## Roadmap
+
 - Hybrid identity: connect enterprise IdP, enable SCIM provisioning, adopt outposts for legacy apps.
 - Automated key rotation pipeline for forward-auth session secrets.
 - Evaluate passkey/WebAuthn support once Authentik surfaces `amr` claims consistently.
 - Expand social login coverage (Apple, Twitter) upon product sign-off.
 
 ## References
+
 - ADR 002 (`11_athentik_user/adr/002-authentik-subsystem-decisions.md`)
 - Forward-auth integration guide (`0_mediaInfra/00_consul_mesh/envoy/README.md`)
 - Authentik documentation: <https://docs.goauthentik.io/>
