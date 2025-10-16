@@ -1,7 +1,7 @@
 # myfarsi_design
 
 ## Overview
-`myfarsi_design` hosts the source for the MyFarsi platform design docs and supporting automation. Markdown sources are kept authoritative; helper scripts build canonical HTML so product, platform, and on-call teams can browse the repository as a static site.
+`myfarsi_design` hosts the source for the MyFarsi platform design docs and supporting automation. Markdown sources are kept authoritative for product, platform, and on-call teams.
 
 ## Repository Layout
 - `00_coding_req` — product requirements and language preferences for new workstreams.
@@ -14,16 +14,14 @@
 
 ## Prerequisites
 - Node.js 20.x for `npx markdownlint-cli2`.
-- Pandoc in the shell `PATH` for Markdown ⇒ HTML conversion.
 - Git configured with access to the upstream repository.
 
 ## Key Commands
-- `make html` — render every Markdown file (except `TableOfContents.md`) to standalone HTML via `script/convert.sh`.
 - `make toc` — regenerate `TableOfContents.md` from tracked Markdown files.
+- `make test` — lint and format Markdown files with markdownlint & prettier.
 - `npx markdownlint-cli2 "**/*.md"` — lint Markdown as enforced by CI.
 - `go test ./...` (inside `90_cli_tools`) — verify Go-based CLI tooling.
 - `pytest -q` or `npm test -- --runInBand` — run language-specific suites; document the chosen command inside the service/module README.
-- `make publish` — rebuild HTML, drop Markdown, and prepare the `html` branch for release.
 
 ## Development Workflow
 1. Extend or create service directories following the numbering scheme; update `ARCHITECTURE.md`, `DESIGN.md`, and `SystemReqs.md` when structure changes.
