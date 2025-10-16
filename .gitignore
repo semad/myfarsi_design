@@ -28,3 +28,9 @@ coverage/
 # Temporary files
 tmp/
 *.tmp
+
+# Go
+*.exe
+*.test
+vendor/
+*.out
