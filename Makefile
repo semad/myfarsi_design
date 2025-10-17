@@ -10,7 +10,7 @@ help:
 	@echo "Available targets:"
 	@echo "  help            Show this help message (default)."
 	@echo "  test            Lint and format Markdown files with markdownlint & prettier."
-	@echo "  toc             Regenerate TableOfContents.md from tracked Markdown."
+	@echo "  toc             Generate README.md with embedded table of contents."
 	@echo "  push            Push current branch to upstream repository."
 
 test:
