@@ -37,11 +37,27 @@ Use Conventional Commits (`feat:`, `fix:`, `chore:`) and supply pull-request des
 
 
 
+
+
+
+
+
+
+
+
+
+
 ---
 
 ## Documentation Table of Contents
 
 <!-- AUTO-GENERATED: Do not edit below this line -->
+
+## Root Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md)
+- [DESIGN.md](DESIGN.md)
+- [SystemReqs.md](SystemReqs.md)
 
 ## `00_coding_req`
 
@@ -137,29 +153,12 @@ Use Conventional Commits (`feat:`, `fix:`, `chore:`) and supply pull-request des
 - [config-cli.md](90_cli_tools/config-cli.md)
 - [echo-server.md](90_cli_tools/echo-server.md)
 
-## `docs/content`
-
-- [minio-runbook.md](docs/content/minio-runbook.md)
-
-## `docs/events`
-
-- [event-catalog.md](docs/events/event-catalog.md)
-
-## `docs/media`
-
-- [kafka-runbook.md](docs/media/kafka-runbook.md)
-- [processing-runbook.md](docs/media/processing-runbook.md)
-
-## `docs/oncall`
-
-- [playbooks.md](docs/oncall/playbooks.md)
-
-## `docs/security`
-
-- [vault-minio.md](docs/security/vault-minio.md)
-
 ## `src/spec-improver/internal/templates`
 
 - [spec.md](src/spec-improver/internal/templates/spec.md)
+
+## `src/spec-improver`
+
+- [README.md](src/spec-improver/README.md)
 
 <!-- END AUTO-GENERATED -->

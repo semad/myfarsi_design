@@ -34,20 +34,28 @@ echo "## Documentation Table of Contents" >> README.toc.tmp
 echo "" >> README.toc.tmp
 echo "<!-- AUTO-GENERATED: Do not edit below this line -->" >> README.toc.tmp
 
-# Get the list of tracked markdown files, excluding patterns
-files=$(git ls-files '**/*.md' | \
-    grep -v -E '(README\.md|TableOfContents\.md|^specs/|^\.specify/|^\.claude/)' | \
-    sort)
+# Get the list of tracked markdown files (both root and subdirectories), excluding patterns
+# Separate root files (no /) and directory files, then combine with root first
+root_files=$(git ls-files '*.md' | grep -v '/' | grep -v -E '(README\.md|TableOfContents\.md)' | sort)
+dir_files=$(git ls-files '**/*.md' | grep -v -E '(^specs/|^\.specify/|^\.claude/)' | sort)
+files=$(printf "%s\n%s\n" "$root_files" "$dir_files" | grep -v '^$')
 
-# Process the file list and generate the TOC (reusing existing AWK logic)
+# Process the file list and generate the TOC (with root files first)
 echo "$files" | awk -F/ '
 BEGIN {
     prev_dir = ""
+    root_section_printed = 0
 }
 {
     if (NF==1) {
+        # Root-level file
+        if (root_section_printed == 0) {
+            print "\n## Root Documentation\n"
+            root_section_printed = 1
+        }
         print "- [" $0 "](" $0 ")"
     } else {
+        # File in subdirectory
         dir = $1
         for (i = 2; i < NF; i++) {
             dir = dir "/" $i
